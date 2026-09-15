@@ -29,9 +29,9 @@ function windDir(deg) {
 
 function rainWord(mm) {
   if (mm == null) return '';
-  if (mm < 0.5) return  (слабый, ${mm} мм/ч);
-  if (mm < 4)   return  (умеренный, ${mm} мм/ч);
-  return  (ЛИВЕНЬ, ${mm} мм/ч!);
+  if (mm < 0.5) return ` (слабый, ${mm} мм/ч)`;
+  if (mm < 4)   return ` (умеренный, ${mm} мм/ч)`;
+  return ` (ЛИВЕНЬ, ${mm} мм/ч!)`;
 }
 
 // ===== ХРАНИЛИЩЕ: Upstash Redis, иначе файл =====
@@ -93,18 +93,18 @@ async function broadcast(text) {
 
 // ===== ИСТОЧНИКИ ПОГОДЫ =====
 async function getCurrentOWM() {
-  const url = http://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru;
+  const url = `http://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru`;
   const w = await (await fetch(url)).json();
   if (!w || !w.wind) throw new Error('OWM: плохой ответ');
   return w;
 }
 async function getForecastOWM(cnt = 2) {
-  const url = http://api.openweathermap.org/data/2.5/forecast?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru&cnt=${cnt};
+  const url = `http://api.openweathermap.org/data/2.5/forecast?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru&cnt=${cnt}`;
   return (await fetch(url)).json();
 }
 async function getCurrentOM() {
-  const url = http://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON} +
-              &current=temperature_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms;
+  const url = `http://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}` +
+              `&current=temperature_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`;
   const j = await (await fetch(url)).json();
   if (!j || !j.current) throw new Error('Open-Meteo: плохой ответ');
   const code = j.current.weather_code;
@@ -133,7 +133,7 @@ const flags = { wind: false, gust: false, rainNow: false, fogNow: false, rainSoo
                 fogSoon: false, stormNow: false, stormSoon: false, iceNow: false, iceSoon: false };
 
 function isIcy(main, id, temp) {
-  if (id === 511  id === 66  id === 67) return true;
+  if (id === 511 || id === 66 || id === 67) return true;
   return ['Rain', 'Drizzle'].includes(main) && temp >= -3 && temp <= 1;
 }
 
@@ -157,66 +157,67 @@ async function checkWeather() {
     if (wind > WIND_LIMIT && !flags.wind) {
       const cross = await getCrossWind();
       const confirm = cross === null ? '' :
-        (cross > WIND_LIMIT ? \n✅ Подтверждено вторым источником (${cross} м/с)
-                            : \n⚠️ Второй источник: ${cross} м/с — расхождение);
-      await broadcast(💨 ВНИМАНИЕ! ${PLACE}\nВетер усилился: ${wind} м/с, ${dirShort} (${dirFull})\nПорог: ${WIND_LIMIT} м/с${confirm});
+        (cross > WIND_LIMIT ? `\n✅ Подтверждено вторым источником (${cross} м/с)`
+                            : `\n⚠️ Второй источник: ${cross} м/с — расхождение`);
+      await broadcast(`💨 ВНИМАНИЕ! ${PLACE}\nВетер усилился: ${wind} м/с, ${dirShort} (${dirFull})\nПорог: ${WIND_LIMIT} м/с${confirm}`);
       flags.wind = true;
     } else if (wind <= WIND_LIMIT) flags.wind = false;
 
     // ПОРЫВЫ
     if (gust > GUST_LIMIT && !flags.gust) {
-      await broadcast(🌪 ОПАСНО! ${PLACE}\nПорывы ветра до ${gust} м/с, ${dirShort} (${dirFull})!);
+      await broadcast(`🌪 ОПАСНО! ${PLACE}\nПорывы ветра до ${gust} м/с, ${dirShort} (${dirFull})!`);
       flags.gust = true;
     } else if (gust <= GUST_LIMIT) flags.gust = false;
 
     // ГРОЗА
     if (stormNow && !flags.stormNow) {
-      await broadcast(⛈ ${PLACE}: гроза! Ветер ${wind} м/с, ${dirShort}.);
+      await broadcast(`⛈ ${PLACE}: гроза! Ветер ${wind} м/с, ${dirShort}.`);
       flags.stormNow = true;
     } else if (!stormNow) flags.stormNow = false;
 
     // ДОЖДЬ (с интенсивностью)
     if (rainNow && !flags.rainNow) {
-      await broadcast(🌧 ${PLACE}: начался дождь${rainWord(rainMm)}\nТемпература ${Math.round(temp)}°C.);
+      await broadcast(`🌧 ${PLACE}: начался дождь${rainWord(rainMm)}\nТемпература ${Math.round(temp)}°C.`);
       flags.rainNow = true;
     } else if (!rainNow) flags.rainNow = false;
 
     // ГОЛОЛЁД
     if (iceNow && !flags.iceNow) {
-      await broadcast(🧊 ОПАСНО! ${PLACE}: гололёд!\nОсадки при температуре ${Math.round(temp)}°C — дороги и провода обледеневают.);
+      await broadcast(`🧊 ОПАСНО! ${PLACE}: гололёд!\nОсадки при температуре ${Math.round(temp)}°C — дороги и провода обледеневают.`);
       flags.iceNow = true;
     } else if (!iceNow) flags.iceNow = false;
 
     // ТУМАН
     if (fogNow && !flags.fogNow) {
-      await broadcast(🌫 ${PLACE}: туман, видимость менее 2 км.);
+      await broadcast(`🌫 ${PLACE}: туман, видимость менее 2 км.`);
       flags.fogNow = true;
     } else if (!fogNow) flags.fogNow = false;
 
     // ПРОГНОЗ на ~3 часа
     let list = [];
-    try { list = ((await getForecastOWM(2))  {}).list  []; }
+    try { list = ((await getForecastOWM(2)) || {}).list || []; }
     catch (e) { console.error('Прогноз недоступен:', e.message); }
 
     const stormSoon = list.some(i => i.weather[0].main === 'Thunderstorm');
     const iceSoon   = list.some(i => isIcy(i.weather[0].main, i.weather[0].id, i.main.temp));
     const rainSoon  = list.some(i => ['Rain', 'Drizzle'].includes(i.weather[0].main));
     const fogSoon   = list.some(i => ['Fog', 'Mist', 'Haze'].includes(i.weather[0].main));
+
     if (stormSoon && !stormNow && !flags.stormSoon) {
-      await broadcast(⛈ Гроза приближается к ${PLACE}, ~3 часа.); flags.stormSoon = true;
+      await broadcast(`⛈ Гроза приближается к ${PLACE}, ~3 часа.`); flags.stormSoon = true;
     } else if (!stormSoon) flags.stormSoon = false;
     if (iceSoon && !iceNow && !flags.iceSoon) {
-      await broadcast(🧊 ВНИМАНИЕ! К ${PLACE} приближаются осадки при ~0°C — возможен гололёд в ближайшие ~3 часа.); flags.iceSoon = true;
+      await broadcast(`🧊 ВНИМАНИЕ! К ${PLACE} приближаются осадки при ~0°C — возможен гололёд в ближайшие ~3 часа.`); flags.iceSoon = true;
     } else if (!iceSoon) flags.iceSoon = false;
     if (rainSoon && !rainNow && !flags.rainSoon) {
-      await broadcast(🌧 Дождь приближается к ${PLACE}, ~3 часа.); flags.rainSoon = true;
+      await broadcast(`🌧 Дождь приближается к ${PLACE}, ~3 часа.`); flags.rainSoon = true;
     } else if (!rainSoon) flags.rainSoon = false;
     if (fogSoon && !fogNow && !flags.fogSoon) {
-      await broadcast(🌫 Туман приближается к ${PLACE}, ~3 часа.); flags.fogSoon = true;
+      await broadcast(`🌫 Туман приближается к ${PLACE}, ~3 часа.`); flags.fogSoon = true;
     } else if (!fogSoon) flags.fogSoon = false;
 
     console.log(new Date().toISOString(),
-      OK [${w._source}]: ${Math.round(temp)}°C, ветер ${wind}/${gust} м/с ${dirShort}, дождь ${rainNow}, гроза ${stormNow}, гололёд ${iceNow}, туман ${fogNow});
+      `OK [${w._source}]: ${Math.round(temp)}°C, ветер ${wind}/${gust} м/с ${dirShort}, дождь ${rainNow}, гроза ${stormNow}, гололёд ${iceNow}, туман ${fogNow}`);
   } catch (e) {
     console.error('Ошибка проверки погоды:', e.message);
   }
@@ -246,13 +247,13 @@ async function digestTick() {
       if ([...conds].some(c => ['Fog', 'Mist', 'Haze'].includes(c))) precip += ', 🌫 туман';
 
       await broadcast(
-        🌅 Доброе утро! Прогноз на сегодня — ${PLACE}\n +
-        ━━━━━━━━━━━━━━━\n +
-        🌡 Температура: от ${Math.round(Math.min(...temps))}° до ${Math.round(Math.max(...temps))}°C\n +
-        💨 Ветер: до ${maxWind} м/с (порывы до ${maxGust} м/с), ${dShort} (${dFull})\n +
-        ☔ Осадки: ${precip}\n +
-        ━━━━━━━━━━━━━━━\n +
-        Хорошего дня! /погода — текущая сводка
+        `🌅 Доброе утро! Прогноз на сегодня — ${PLACE}\n` +
+        `━━━━━━━━━━━━━━━\n` +
+        `🌡 Температура: от ${Math.round(Math.min(...temps))}° до ${Math.round(Math.max(...temps))}°C\n` +
+        `💨 Ветер: до ${maxWind} м/с (порывы до ${maxGust} м/с), ${dShort} (${dFull})\n` +
+        `☔ Осадки: ${precip}\n` +
+        `━━━━━━━━━━━━━━━\n` +
+        `Хорошего дня! /погода — текущая сводка`
       );
       console.log('Утренняя сводка отправлена');
     } catch (e) { console.error('Ошибка сводки:', e.message); }
@@ -270,7 +271,7 @@ bot.on('message_created', async (ctx) => {
     try {
       const w = await getCurrent();
       const [dirShort, dirFull] = windDir(w.wind.deg);
-      const gust = w.wind.gust ?  (порывы до ${w.wind.gust} м/с) : '';
+      const gust = w.wind.gust ? ` (порывы до ${w.wind.gust} м/с)` : '';
       const vis = (w.visibility != null) ? w.visibility : 10000;
       const fogOwm = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(w.weather[0].main) || vis < 2000;
       let om = null;
@@ -278,19 +279,19 @@ bot.on('message_created', async (ctx) => {
       const omFog = om ? (om.weather[0].main === 'Fog') : null;
       const omDir = om ? windDir(om.wind.deg)[0] : 'н/д';
       const fogYes = fogOwm || omFog === true;
-      const fogLine = fogYes ? 🌫 Туман: ДА, видимость ~${vis} м
-                             : 🌫 Туман: нет, видимость ~${vis >= 10000 ? '10+ км' : vis + ' м'};
+      const fogLine = fogYes ? `🌫 Туман: ДА, видимость ~${vis} м`
+                             : `🌫 Туман: нет, видимость ~${vis >= 10000 ? '10+ км' : vis + ' м'}`;
       let warn = '';
       if (om && Math.abs(w.wind.speed - om.wind.speed) > 2) {
-        warn = \n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ${w.wind.speed} м/с, ${dirShort}\n   Open-Meteo: ${om.wind.speed} м/с, ${omDir};
+        warn = `\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ${w.wind.speed} м/с, ${dirShort}\n   Open-Meteo: ${om.wind.speed} м/с, ${omDir}`;
       }
       ctx.reply(
-        📍 ${PLACE} | сводка\n━━━━━━━━━━━━━━━\n +
-        🌡 Температура: ${Math.round(w.main.temp)}°C\n +
-        ☁️ Состояние: ${w.weather[0].description}\n +
-        💨 Ветер: ${w.wind.speed} м/с${gust}, ${dirShort} (${dirFull})\n +
-        fogLine + \n━━━━━━━━━━━━━━━\n +
-        🔁 Контроль (Open-Meteo): ${om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен'}, туман: ${omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')} + warn
+        `📍 ${PLACE} | сводка\n━━━━━━━━━━━━━━━\n` +
+        `🌡 Температура: ${Math.round(w.main.temp)}°C\n` +
+        `☁️ Состояние: ${w.weather[0].description}\n` +
+        `💨 Ветер: ${w.wind.speed} м/с${gust}, ${dirShort} (${dirFull})\n` +
+        fogLine + `\n━━━━━━━━━━━━━━━\n` +
+        `🔁 Контроль (Open-Meteo): ${om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен'}, туман: ${omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')}` + warn
       );
     } catch (e) { ctx.reply('Не удалось получить погоду, попробуйте позже.'); }
     return;
@@ -306,9 +307,9 @@ bot.on('message_created', async (ctx) => {
         const t = new Date(i.dt * 1000 + 3 * 3600 * 1000); // МСК
         const hh = String(t.getUTCHours()).padStart(2, '0');
         const [ds] = windDir(i.wind.deg);
-        return 🕐 ${hh}:00 — ${Math.round(i.main.temp)}°C, ${i.weather[0].description}, ветер ${i.wind.speed} м/с ${ds};
+        return `🕐 ${hh}:00 — ${Math.round(i.main.temp)}°C, ${i.weather[0].description}, ветер ${i.wind.speed} м/с ${ds}`;
       });
-      ctx.reply(📅 ${PLACE}, прогноз на 12 часов (мск):\n━━━━━━━━━━━━━━━\n + lines.join('\n'));
+      ctx.reply(`📅 ${PLACE}, прогноз на 12 часов (мск):\n━━━━━━━━━━━━━━━\n` + lines.join('\n'));
     } catch (e) { ctx.reply('Не удалось получить прогноз.'); }
     return;
   }
@@ -334,15 +335,15 @@ bot.on('message_created', async (ctx) => {
 
   // --- админские команды ---
   if (low === '/подписчики') {
-    if (uid === adminId) ctx.reply(👥 Подписчиков в рассылке: ${subscribers.size});
+    if (uid === adminId) ctx.reply(`👥 Подписчиков в рассылке: ${subscribers.size}`);
     return;
   }
   if (low.startsWith('/сказать')) {
     if (uid !== adminId) return;
     const msg = text.slice('/сказать'.length).trim();
     if (!msg) { ctx.reply('Формат: /сказать <текст>'); return; }
-    await broadcast(📢 ${msg});
-    ctx.reply(Отправлено ${subscribers.size} подписчикам.);
+    await broadcast(`📢 ${msg}`);
+    ctx.reply(`Отправлено ${subscribers.size} подписчикам.`);
     return;
   }
 });
