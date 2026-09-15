@@ -1,4 +1,4 @@
-[15.09.2026 22:41] Лева Лева: process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const { Bot } = require('@maxhub/max-bot-api');
 const fetch = require('node-fetch');
