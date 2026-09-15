@@ -6,12 +6,12 @@ const http = require('http');
 const fs = require('fs');
 
 // ===== НАСТРОЙКИ =====
-const WIND_LIMIT = 4;          // порог среднего ветра, м/с
-const GUST_LIMIT = 8;          // порог порывов ветра, м/с
-const CHECK_MINUTES = 10;      // интервал проверки погоды
-const DIGEST_HOUR_UTC = 3;     // утренняя сводка: 6:00 МСК = 3:00 UTC
-const ADMIN_PASS = 'метео2026';// <<< СМЕНИТЕ ПАРОЛЬ АДМИНА!
-const LAT = 48.8105;           // Рай-Александровка, Николаевская община
+const WIND_LIMIT = 4;
+const GUST_LIMIT = 8;
+const CHECK_MINUTES = 10;
+const DIGEST_HOUR_UTC = 3;      // 6:00 МСК
+const ADMIN_PASS = 'метео2026'; // <<< СМЕНИТЕ ПАРОЛЬ!
+const LAT = 48.8105;
 const LON = 37.8513;
 const PLACE = 'Рай-Александровка';
 
@@ -26,14 +26,12 @@ function windDir(deg) {
                 ['Ю','южный'],['ЮЗ','юго-западный'],['З','западный'],['СЗ','северо-западный']];
   return dirs[Math.round((deg || 0) / 45) % 8];
 }
-
 function rainWord(mm) {
   if (mm == null) return '';
   if (mm < 0.5) return ' (слабый, ' + mm + ' мм/ч)';
   if (mm < 4)   return ' (умеренный, ' + mm + ' мм/ч)';
   return ' (ЛИВЕНЬ, ' + mm + ' мм/ч!)';
 }
-
 function wmoText(code) {
   if (code === 0) return '☀️ ясно';
   if (code === 1) return '🌤 преимущественно ясно';
@@ -50,7 +48,6 @@ function wmoText(code) {
   if (code >= 95) return '⛈ гроза';
   return 'облачно';
 }
-
 function dayName(dateStr) {
   const days = ['воскресенье','понедельник','вторник','среда','четверг','пятница','суббота'];
   const d = new Date(dateStr + 'T12:00:00+03:00');
@@ -58,7 +55,7 @@ function dayName(dateStr) {
   return dm + ' (' + days[d.getDay()] + ')';
 }
 
-// ===== ХРАНИЛИЩЕ: Upstash Redis, иначе файлы =====
+// ===== ХРАНИЛИЩЕ =====
 let redis = null;
 if (process.env.REDIS_URL && process.env.REDIS_TOKEN) {
   const { Redis } = require('@upstash/redis');
@@ -122,9 +119,44 @@ async function removeReminder(uid) {
   } catch (e) {}
 }
 
+// ===== МЕНЮ С КНОПКАМИ =====
+const MENU_TEXT = '📋 Команды Метеодозора (можно писать просто словом, без /):\n\n' +
+  'погода — сводка прямо сейчас\n' +
+  'прогноз — погода на 12 часов\n' +
+  'неделя — прогноз на 7 дней\n' +
+  'напоминание — ежедневная сводка в ваше время\n' +
+  'отписаться — выключить рассылку';
+
+async function sendMenu(userId) {
+  try {
+    const res = await fetch('https://botapi.max.ru/messages?access_token=' + (process.env.BOT_TOKEN || '').trim() + '&user_id=' + userId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: MENU_TEXT,
+        attachments: [{
+          type: 'inline_keyboard',
+          payload: { buttons: [
+            [{ type: 'callback', text: '🌤 Погода', payload: 'cmd:погода' }],
+            [{ type: 'callback', text: '📅 Прогноз на 12 ч', payload: 'cmd:прогноз' }],
+            [{ type: 'callback', text: '🗓 Прогноз на неделю', payload: 'cmd:неделя' }],
+            [{ type: 'callback', text: '⏰ Напоминание', payload: 'cmd:напоминание' }],
+            [{ type: 'callback', text: '🚫 Отписаться', payload: 'cmd:отписаться' }]
+          ]}
+        }]
+      })
+    });
+    console.log('Меню с кнопками отправлено, статус:', res.status);
+  } catch (e) {
+    console.error('Кнопки не отправились, шлю текст:', e.message);
+    try { await bot.api.sendMessageToUser(userId, MENU_TEXT); } catch (e2) {}
+  }
+}
+
 bot.on('bot_started', async function (ctx) {
   await addSub(ctx.user.user_id);
-  ctx.reply('Вы подписаны на оповещения Метеодозора!\nКоманды: /погода, /прогноз, /неделя, /напоминание, /отписаться');
+  try { await ctx.reply('Добро пожаловать в Метеодозор! Вы подписаны на оповещения о погоде.'); } catch (e) {}
+  await sendMenu(ctx.user.user_id);
 });
 
 // ===== РАССЫЛКА =====
@@ -182,7 +214,7 @@ async function getCrossWind() {
   try { return (await getCurrentOM()).wind.speed; } catch (e) { return null; }
 }
 
-// ===== СВОДКА НА ДЕНЬ (для утренней рассылки и напоминаний) =====
+// ===== СВОДКА НА ДЕНЬ =====
 async function buildDayText(header) {
   const f = await getForecastOWM(4);
   const list = (f && f.list) || [];
@@ -306,7 +338,7 @@ async function digestTick() {
     try {
       const text = await buildDayText('🌅 Доброе утро! Прогноз на сегодня — ' + PLACE);
       if (text) {
-        await broadcast(text + '\nХорошего дня! /погода — текущая сводка');
+        await broadcast(text + '\nХорошего дня! Напишите «погода» — текущая сводка');
         console.log('Утренняя сводка отправлена');
       }
     } catch (e) { console.error('Ошибка сводки:', e.message); }
@@ -329,85 +361,43 @@ async function reminderTick() {
   }
 }
 
-// ===== МЕНЮ КОМАНД (с диагностикой ответа MAX) =====
-async function setCommands() {
-  const TOKEN = (process.env.BOT_TOKEN || '').trim();
-  console.log('Длина токена для меню:', TOKEN.length);
-  const cmdsRu = [
-    { name: 'погода', description: 'Текущая сводка погоды' },
-    { name: 'прогноз', description: 'Прогноз на 12 часов' },
-    { name: 'неделя', description: 'Прогноз на 7 дней' },
-    { name: 'напоминание', description: 'Ежедневная сводка в ваше время' },
-    { name: 'отписаться', description: 'Отключить оповещения' }
-  ];
-  const cmdsLat = [
-    { name: 'pogoda', description: 'Текущая сводка погоды' },
-    { name: 'prognoz', description: 'Прогноз на 12 часов' },
-    { name: 'nedelya', description: 'Прогноз на 7 дней' },
-    { name: 'napominanie', description: 'Ежедневная сводка в ваше время' },
-    { name: 'otmena', description: 'Отключить оповещения' }
-  ];
-  try {
-    let res = await fetch('https://botapi.max.ru/me?access_token=' + TOKEN, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commands: cmdsRu })
-    });
-    let body = await res.text();
-    console.log('Меню команд (ru): статус', res.status, '| ответ MAX:', body.slice(0, 300));
-
-    if (res.status !== 200) {
-      res = await fetch('https://botapi.max.ru/me?access_token=' + TOKEN, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ commands: cmdsLat })
-      });
-      body = await res.text();
-      console.log('Меню команд (lat): статус', res.status, '| ответ MAX:', body.slice(0, 300));
-    }
-  } catch (e) { console.error('Не удалось установить команды:', e.message); }
-}
-
-// ===== КОМАНДЫ =====
-bot.on('message_created', async function (ctx) {
-  const text = (ctx.message.body.text || '').trim();
-  const low = text.toLowerCase();
+// ===== ОБРАБОТКА ТЕКСТА (общая для сообщений и кнопок) =====
+async function onText(ctx, text) {
+  const low = (text || '').trim().toLowerCase();
   const uid = ctx.user && ctx.user.user_id;
 
-  // --- ввод времени после /напоминание ---
+  // ввод времени после «напоминание»
   if (pendingReminder.has(uid)) {
     if (low.indexOf('стоп') !== -1 || low.indexOf('отмена') !== -1) {
       pendingReminder.delete(uid);
       ctx.reply('Хорошо, напоминание не задаю.');
       return;
     }
-    const m = text.match(/^(\d{1,2})[:.](\d{2})$/);
+    const m = text.trim().match(/^(\d{1,2})[:.](\d{2})$/);
     if (m && +m[1] < 24 && +m[2] < 60) {
       const t = ('0' + (+m[1])).slice(-2) + ':' + m[2];
       pendingReminder.delete(uid);
       await saveReminder(uid, t);
-      ctx.reply('✅ Готово! Теперь каждый день в ' + t + ' (мск) вам будет приходить сводка погоды.\nОтключить: /напоминание стоп');
+      ctx.reply('✅ Готово! Теперь каждый день в ' + t + ' (мск) вам будет приходить сводка погоды.\nОтключить: напоминание стоп');
     } else {
       ctx.reply('Не понял время. Напишите в формате ЧЧ:ММ, например 07:30');
     }
     return;
   }
 
-  // --- /напоминание ---
-  if (low === '/напоминание' || low === 'напоминание' || low === '/napominanie') {
+  if (low === '/напоминание' || low === 'напоминание') {
     pendingReminder.add(uid);
     ctx.reply('⏰ В какое время присылать вам прогноз погоды каждый день?\nНапишите время в формате ЧЧ:ММ, например 07:30 (московское время).\nОтмена: напишите «стоп»');
     return;
   }
-  if (low === '/напоминание стоп') {
+  if (low === '/напоминание стоп' || low === 'напоминание стоп') {
     pendingReminder.delete(uid);
     await removeReminder(uid);
     ctx.reply('Напоминание отключено.');
     return;
   }
 
-  // --- /погода ---
-  if (low === '/погода' || low === 'погода' || low === '/pogoda') {
+  if (low === '/погода' || low === 'погода') {
     try {
       const w = await getCurrent();
       const dd = windDir(w.wind.deg);
@@ -440,8 +430,7 @@ bot.on('message_created', async function (ctx) {
     return;
   }
 
-  // --- /прогноз ---
-  if (low === '/прогноз' || low === 'прогноз' || low === '/prognoz') {
+  if (low === '/прогноз' || low === 'прогноз') {
     try {
       const f = await getForecastOWM(4);
       const list = (f && f.list) || [];
@@ -457,8 +446,7 @@ bot.on('message_created', async function (ctx) {
     return;
   }
 
-  // --- /неделя ---
-  if (low === '/неделя' || low === 'неделя' || low === '/nedelya') {
+  if (low === '/неделя' || low === 'неделя') {
     try {
       const d = await getWeekOM();
       const lines = [];
@@ -476,15 +464,18 @@ bot.on('message_created', async function (ctx) {
     return;
   }
 
-  // --- /отписаться ---
-  if (low === '/отписаться' || low === 'отписаться' || low === '/otmena') {
+  if (low === '/отписаться' || low === 'отписаться') {
     await delSub(uid);
     await removeReminder(uid);
     ctx.reply('Вы отписаны от оповещений. Чтобы вернуться — просто напишите боту снова.');
     return;
   }
 
-  // --- /админ <пароль> ---
+  if (low === 'меню' || low === 'команды' || low === 'помощь' || low === '/меню' || low === '/start') {
+    await sendMenu(uid);
+    return;
+  }
+
   if (low.indexOf('/админ') === 0) {
     const pass = text.split(/\s+/)[1];
     if (pass === ADMIN_PASS) {
@@ -495,8 +486,6 @@ bot.on('message_created', async function (ctx) {
     }
     return;
   }
-
-  // --- админские команды ---
   if (low === '/подписчики') {
     if (uid === adminId) ctx.reply('👥 Подписчиков в рассылке: ' + subscribers.size);
     return;
@@ -509,6 +498,30 @@ bot.on('message_created', async function (ctx) {
     ctx.reply('Отправлено ' + subscribers.size + ' подписчикам.');
     return;
   }
+
+  // Неизвестная команда — показываем меню
+  ctx.reply('Не понял команду 🤔\n\n' + MENU_TEXT);
+}
+
+bot.on('message_created', async function (ctx) {
+  try { await onText(ctx, ctx.message.body.text); }
+  catch (e) { console.error('Ошибка обработки сообщения:', e.message); }
+});
+
+// Кнопки
+bot.on('message_callback', async function (ctx) {
+  try {
+    const payload = ctx.callback && ctx.callback.payload;
+    const uid = ctx.user && ctx.user.user_id;
+    if (!payload || !uid) return;
+    if (payload.indexOf('cmd:') === 0) {
+      const fakeCtx = {
+        user: { user_id: uid },
+        reply: function (t) { return bot.api.sendMessageToUser(uid, t); }
+      };
+      await onText(fakeCtx, payload.slice(4));
+    }
+  } catch (e) { console.error('Ошибка кнопки:', e.message); }
 });
 
 // ===== ВЕБ-СЕРВЕР =====
@@ -522,6 +535,5 @@ http.createServer(function (req, res) { res.writeHead(200); res.end('Meteodozor 
   setInterval(function () { digestTick(); reminderTick(); }, 60 * 1000);
   checkWeather();
   bot.start();
-  setCommands();
   console.log('Бот запущен, мониторинг погоды активен');
 })();
