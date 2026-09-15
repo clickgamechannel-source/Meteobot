@@ -331,6 +331,8 @@ async function reminderTick() {
 
 // ===== МЕНЮ КОМАНД (с диагностикой ответа MAX) =====
 async function setCommands() {
+  const TOKEN = (process.env.BOT_TOKEN || '').trim();
+  console.log('Длина токена для меню:', TOKEN.length);
   const cmdsRu = [
     { name: 'погода', description: 'Текущая сводка погоды' },
     { name: 'прогноз', description: 'Прогноз на 12 часов' },
@@ -346,7 +348,7 @@ async function setCommands() {
     { name: 'otmena', description: 'Отключить оповещения' }
   ];
   try {
-    let res = await fetch('https://botapi.max.ru/me?access_token=' + process.env.BOT_TOKEN, {
+    let res = await fetch('https://botapi.max.ru/me?access_token=' + TOKEN, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commands: cmdsRu })
@@ -355,7 +357,7 @@ async function setCommands() {
     console.log('Меню команд (ru): статус', res.status, '| ответ MAX:', body.slice(0, 300));
 
     if (res.status !== 200) {
-      res = await fetch('https://botapi.max.ru/me?access_token=' + process.env.BOT_TOKEN, {
+      res = await fetch('https://botapi.max.ru/me?access_token=' + TOKEN, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ commands: cmdsLat })
