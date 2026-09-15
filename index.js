@@ -182,7 +182,7 @@ async function getCrossWind() {
   try { return (await getCurrentOM()).wind.speed; } catch (e) { return null; }
 }
 
-// ===== СВОДКА НА ДЕНЬ (общая для утренней рассылки и напоминаний) =====
+// ===== СВОДКА НА ДЕНЬ (для утренней рассылки и напоминаний) =====
 async function buildDayText(header) {
   const f = await getForecastOWM(4);
   const list = (f && f.list) || [];
@@ -329,7 +329,7 @@ async function reminderTick() {
   }
 }
 
-// ===== МЕНЮ КОМАНД В ЧАТЕ =====
+// ===== МЕНЮ КОМАНД (с диагностикой ответа MAX) =====
 async function setCommands() {
   const cmdsRu = [
     { name: 'погода', description: 'Текущая сводка погоды' },
@@ -351,14 +351,18 @@ async function setCommands() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ commands: cmdsRu })
     });
+    let body = await res.text();
+    console.log('Меню команд (ru): статус', res.status, '| ответ MAX:', body.slice(0, 300));
+
     if (res.status !== 200) {
       res = await fetch('https://botapi.max.ru/me?access_token=' + process.env.BOT_TOKEN, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ commands: cmdsLat })
       });
+      body = await res.text();
+      console.log('Меню команд (lat): статус', res.status, '| ответ MAX:', body.slice(0, 300));
     }
-    console.log('Меню команд установлено, статус:', res.status);
   } catch (e) { console.error('Не удалось установить команды:', e.message); }
 }
 
@@ -481,7 +485,7 @@ bot.on('message_created', async function (ctx) {
   // --- /админ <пароль> ---
   if (low.indexOf('/админ') === 0) {
     const pass = text.split(/\s+/)[1];
-    if (pass === питбуль) {
+    if (pass === ADMIN_PASS) {
       await setAdmin(uid);
       ctx.reply('✅ Вы назначены админом. Команды:\n/подписчики — число подписчиков\n/сказать <текст> — рассылка всем');
     } else {
