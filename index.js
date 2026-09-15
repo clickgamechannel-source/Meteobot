@@ -17,6 +17,7 @@ const PLACE = 'Рай-Александровка';
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
+const TOKEN = (process.env.BOT_TOKEN || '').trim();
 
 process.on('uncaughtException', function (e) { console.error('uncaughtException:', e.message); });
 process.on('unhandledRejection', function (e) { console.error('unhandledRejection:', e && e.message); });
@@ -119,7 +120,7 @@ async function removeReminder(uid) {
   } catch (e) {}
 }
 
-// ===== МЕНЮ С КНОПКАМИ =====
+// ===== МЕНЮ С КНОПКАМИ (Authorization header) =====
 const MENU_TEXT = '📋 Команды Метеодозора (можно писать просто словом, без /):\n\n' +
   'погода — сводка прямо сейчас\n' +
   'прогноз — погода на 12 часов\n' +
@@ -129,9 +130,9 @@ const MENU_TEXT = '📋 Команды Метеодозора (можно пис
 
 async function sendMenu(userId) {
   try {
-    const res = await fetch('https://botapi.max.ru/messages?access_token=' + (process.env.BOT_TOKEN || '').trim() + '&user_id=' + userId, {
+    const res = await fetch('https://botapi.max.ru/messages?user_id=' + userId, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN },
       body: JSON.stringify({
         text: MENU_TEXT,
         attachments: [{
@@ -147,6 +148,10 @@ async function sendMenu(userId) {
       })
     });
     console.log('Меню с кнопками отправлено, статус:', res.status);
+    if (res.status !== 200) {
+      console.log('Ответ MAX:', (await res.text()).slice(0, 200));
+      await bot.api.sendMessageToUser(userId, MENU_TEXT);
+    }
   } catch (e) {
     console.error('Кнопки не отправились, шлю текст:', e.message);
     try { await bot.api.sendMessageToUser(userId, MENU_TEXT); } catch (e2) {}
@@ -155,7 +160,7 @@ async function sendMenu(userId) {
 
 bot.on('bot_started', async function (ctx) {
   await addSub(ctx.user.user_id);
-  try { await ctx.reply('Добро пожаловать в Метеодозор! Вы подписаны на оповещения о погоде.'); } catch (e) {}
+  try { await ctx.reply('Добро пожаловать в Метеодозор! Вы подписаны на оповещения о погоде в п. Рай-Александровка.'); } catch (e) {}
   await sendMenu(ctx.user.user_id);
 });
 
@@ -361,12 +366,46 @@ async function reminderTick() {
   }
 }
 
-// ===== ОБРАБОТКА ТЕКСТА (общая для сообщений и кнопок) =====
+// ===== МЕНЮ КОМАНД В ПОЛЕ ВВОДА (Authorization header) =====
+async function setCommands() {
+  const cmdsRu = [
+    { name: 'погода', description: 'Текущая сводка погоды' },
+    { name: 'прогноз', description: 'Прогноз на 12 часов' },
+    { name: 'неделя', description: 'Прогноз на 7 дней' },
+    { name: 'напоминание', description: 'Ежедневная сводка в ваше время' },
+    { name: 'отписаться', description: 'Отключить оповещения' }
+  ];
+  const cmdsLat = [
+    { name: 'pogoda', description: 'Текущая сводка погоды' },
+    { name: 'prognoz', description: 'Прогноз на 12 часов' },
+    { name: 'nedelya', description: 'Прогноз на 7 дней' },
+    { name: 'napominanie', description: 'Ежедневная сводка в ваше время' },
+    { name: 'otmena', description: 'Отключить оповещения' }
+  ];
+  try {
+    let res = await fetch('https://botapi.max.ru/me', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN },
+      body: JSON.stringify({ commands: cmdsRu })
+    });
+    console.log('Меню команд (ru): статус', res.status);
+    if (res.status !== 200) {
+      console.log('Ответ MAX:', (await res.text()).slice(0, 200));
+      res = await fetch('https://botapi.max.ru/me', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN },
+        body: JSON.stringify({ commands: cmdsLat })
+      });
+      console.log('Меню команд (lat): статус', res.status);
+    }
+  } catch (e) { console.error('Не удалось установить команды:', e.message); }
+}
+
+// ===== ОБРАБОТКА ТЕКСТА =====
 async function onText(ctx, text) {
   const low = (text || '').trim().toLowerCase();
   const uid = ctx.user && ctx.user.user_id;
 
-  // ввод времени после «напоминание»
   if (pendingReminder.has(uid)) {
     if (low.indexOf('стоп') !== -1 || low.indexOf('отмена') !== -1) {
       pendingReminder.delete(uid);
@@ -499,7 +538,6 @@ async function onText(ctx, text) {
     return;
   }
 
-  // Неизвестная команда — показываем меню
   ctx.reply('Не понял команду 🤔\n\n' + MENU_TEXT);
 }
 
@@ -508,7 +546,6 @@ bot.on('message_created', async function (ctx) {
   catch (e) { console.error('Ошибка обработки сообщения:', e.message); }
 });
 
-// Кнопки
 bot.on('message_callback', async function (ctx) {
   try {
     const payload = ctx.callback && ctx.callback.payload;
@@ -535,5 +572,6 @@ http.createServer(function (req, res) { res.writeHead(200); res.end('Meteodozor 
   setInterval(function () { digestTick(); reminderTick(); }, 60 * 1000);
   checkWeather();
   bot.start();
+  setCommands();
   console.log('Бот запущен, мониторинг погоды активен');
 })();
