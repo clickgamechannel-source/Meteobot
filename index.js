@@ -202,7 +202,7 @@ async function checkWeather() {
     const iceSoon   = list.some(i => isIcy(i.weather[0].main, i.weather[0].id, i.main.temp));
     const rainSoon  = list.some(i => ['Rain', 'Drizzle'].includes(i.weather[0].main));
     const fogSoon   = list.some(i => ['Fog', 'Mist', 'Haze'].includes(i.weather[0].main));
-[15.09.2026 22:41] Лева Лева: if (stormSoon && !stormNow && !flags.stormSoon) {
+    if (stormSoon && !stormNow && !flags.stormSoon) {
       await broadcast(⛈ Гроза приближается к ${PLACE}, ~3 часа.); flags.stormSoon = true;
     } else if (!stormSoon) flags.stormSoon = false;
     if (iceSoon && !iceNow && !flags.iceSoon) {
