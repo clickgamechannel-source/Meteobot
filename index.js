@@ -1,3 +1,5 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // фикс SSL на Railway
+
 const { Bot } = require('@maxhub/max-bot-api');
 const fetch = require('node-fetch');
 const http = require('http');
@@ -13,15 +15,19 @@ const PLACE = 'Рай-Александровка';
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
 
-// ===== ПОДПИСЧИКИ (хранятся в файле) =====
+// Чтобы бот никогда не падал целиком
+process.on('uncaughtException', (e) => console.error('uncaughtException:', e.message));
+process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e && e.message));
+
+// ===== ПОДПИСЧИКИ =====
 const SUBS_FILE = 'subscribers.json';
 let subscribers = new Set();
 try {
   subscribers = new Set(JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8')));
-} catch (e) { /* файла пока нет — начнём с пустого списка */ }
+} catch (e) { /* первый запуск — список пуст */ }
 
 function saveSubs() {
-  fs.writeFileSync(SUBS_FILE, JSON.stringify([...subscribers]));
+  try { fs.writeFileSync(SUBS_FILE, JSON.stringify([...subscribers])); } catch (e) {}
 }
 
 bot.on('bot_started', (ctx) => {
@@ -45,43 +51,46 @@ async function broadcast(text) {
 const flags = { wind: false, rainNow: false, fogNow: false, rainSoon: false, fogSoon: false };
 
 async function getCurrent() {
-  const url = `https://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru`;
+  const url = `http://api.openweathermap.org/data/2.5/weather?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru`;
   return (await fetch(url)).json();
 }
 
 async function getForecast() {
-  const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru&cnt=2`;
+  const url = `http://api.openweathermap.org/data/2.5/forecast?lat=${LAT}&lon=${LON}&appid=${WEATHER_KEY}&units=metric&lang=ru&cnt=2`;
   return (await fetch(url)).json();
 }
 
 async function checkWeather() {
   try {
     const w = await getCurrent();
+
+    // Если API вернул ошибку (например, ключ ещё не активировался)
+    if (!w || !w.wind) {
+      console.error('Странный ответ погоды:', JSON.stringify(w));
+      return;
+    }
+
     const wind = w.wind.speed;
-    const rainNow = w.weather[0].main === 'Rain' || w.weather[0].main === 'Drizzle' || w.weather[0].main === 'Thunderstorm';
+    const rainNow = ['Rain', 'Drizzle', 'Thunderstorm'].includes(w.weather[0].main);
     const fogNow = ['Fog', 'Mist', 'Haze'].includes(w.weather[0].main) || w.visibility < 1000;
 
-    // Ветер
     if (wind > WIND_LIMIT && !flags.wind) {
       await broadcast(`💨 ВНИМАНИЕ! ${PLACE}\nВетер усилился: ${wind} м/с (порог ${WIND_LIMIT} м/с)`);
       flags.wind = true;
     } else if (wind <= WIND_LIMIT) flags.wind = false;
 
-    // Дождь идёт
     if (rainNow && !flags.rainNow) {
       await broadcast(`🌧 ${PLACE}: начался дождь.`);
       flags.rainNow = true;
     } else if (!rainNow) flags.rainNow = false;
 
-    // Туман есть
     if (fogNow && !flags.fogNow) {
       await broadcast(`🌫 ${PLACE}: туман, видимость ${w.visibility} м.`);
       flags.fogNow = true;
     } else if (!fogNow) flags.fogNow = false;
 
-    // Прогноз на ~3 часа: дождь и туман приближаются
     const f = await getForecast();
-    const soon = (f.list || []).map(i => i.weather[0].main);
+    const soon = ((f && f.list) || []).map(i => i.weather[0].main);
     const rainSoon = soon.some(m => ['Rain', 'Drizzle', 'Thunderstorm'].includes(m));
     const fogSoon = soon.some(m => ['Fog', 'Mist', 'Haze'].includes(m));
 
@@ -95,7 +104,7 @@ async function checkWeather() {
       flags.fogSoon = true;
     } else if (!fogSoon) flags.fogSoon = false;
 
-    console.log(new Date().toISOString(), `ветер ${wind} м/с, дождь: ${rainNow}, туман: ${fogNow}`);
+    console.log(new Date().toISOString(), `OK: ветер ${wind} м/с, дождь ${rainNow}, туман ${fogNow}`);
   } catch (e) {
     console.error('Ошибка проверки погоды:', e.message);
   }
@@ -107,6 +116,7 @@ bot.on('message_created', async (ctx) => {
   if (text === '/погода' || text === 'погода') {
     try {
       const w = await getCurrent();
+      if (!w || !w.wind) { ctx.reply('Погодный сервис пока не отвечает, попробуйте позже.'); return; }
       ctx.reply(
         `📍 ${PLACE} сейчас:\n` +
         `🌡 ${Math.round(w.main.temp)}°C, ${w.weather[0].description}\n` +
@@ -119,12 +129,9 @@ bot.on('message_created', async (ctx) => {
   }
 });
 
-// ===== ВЕБ-СЕРВЕР (нужен для хостинга) =====
+// ===== ВЕБ-СЕРВЕР =====
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Meteodozor OK');
-}).listen(PORT);
+http.createServer((req, res) => { res.writeHead(200); res.end('Meteodozor OK'); }).listen(PORT);
 
 // ===== ЗАПУСК =====
 setInterval(checkWeather, CHECK_MINUTES * 60 * 1000);
