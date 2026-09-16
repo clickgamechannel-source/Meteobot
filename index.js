@@ -120,7 +120,7 @@ async function removeReminder(uid) {
   } catch (e) {}
 }
 
-// ===== МЕНЮ С КНОПКАМИ (Authorization header) =====
+// ===== МЕНЮ С КНОПКАМИ =====
 const MENU_TEXT = '📋 Команды Метеодозора (можно писать просто словом, без /):\n\n' +
   'погода — сводка прямо сейчас\n' +
   'прогноз — погода на 12 часов\n' +
@@ -185,24 +185,37 @@ async function getForecastOWM(cnt) {
               '&appid=' + WEATHER_KEY + '&units=metric&lang=ru&cnt=' + cnt;
   return (await fetch(url)).json();
 }
+
+// Open-Meteo: текущие + влажность, точка росы, почасовая видимость
 async function getCurrentOM() {
   const url = 'http://api.open-meteo.com/v1/forecast?latitude=' + LAT + '&longitude=' + LON +
-              '&current=temperature_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms';
+              '&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,weather_code,wind_speed_10m,wind_direction_10m' +
+              '&hourly=visibility&wind_speed_unit=ms&timezone=Europe%2FMoscow&forecast_days=2';
   const j = await (await fetch(url)).json();
   if (!j || !j.current) throw new Error('Open-Meteo: плохой ответ');
   const code = j.current.weather_code;
   const main = (code >= 95) ? 'Thunderstorm' : (code >= 51 && code <= 67) ? 'Rain' :
                (code >= 71 && code <= 86) ? 'Snow' : (code === 45 || code === 48) ? 'Fog' : 'Clear';
+  // Видимость на текущий час из почасового ряда
+  let vis = null;
+  try {
+    const curKey = new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 13);
+    for (let k = 0; k < j.hourly.time.length; k++) {
+      if (j.hourly.time[k].slice(0, 13) === curKey) { vis = j.hourly.visibility[k]; break; }
+    }
+  } catch (e) {}
   return {
     main: { temp: j.current.temperature_2m },
+    humidity: j.current.relative_humidity_2m,
+    dew: j.current.dew_point_2m,
     wind: { speed: j.current.wind_speed_10m, deg: j.current.wind_direction_10m },
     weather: [{ main: main, id: code, description: 'по данным Open-Meteo' }],
-    visibility: 10000
+    visibility: vis
   };
 }
 async function getWeekOM() {
   const url = 'http://api.open-meteo.com/v1/forecast?latitude=' + LAT + '&longitude=' + LON +
-    '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant' +
+    '&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant' +
     '&wind_speed_unit=ms&timezone=Europe%2FMoscow&forecast_days=7';
   const j = await (await fetch(url)).json();
   if (!j || !j.daily) throw new Error('Open-Meteo weekly: плохой ответ');
@@ -212,11 +225,20 @@ async function getCurrent() {
   try { const w = await getCurrentOWM(); w._source = 'OpenWeatherMap'; return w; }
   catch (e) {
     console.error('OWM недоступен, резерв Open-Meteo:', e.message);
-    const w = await getCurrentOM(); w._source = 'Open-Meteo (резерв)'; return w;
+    const w = await getCurrentOM();
+    if (w.visibility == null) w.visibility = 10000;
+    w._source = 'Open-Meteo (резерв)'; return w;
   }
 }
 async function getCrossWind() {
   try { return (await getCurrentOM()).wind.speed; } catch (e) { return null; }
+}
+
+// Расчётный детектор тумана: влажность >= 93%, точка росы близко, ветер слабый
+function fogRisk(om) {
+  if (!om || om.humidity == null || om.dew == null) return false;
+  const spread = om.main.temp - om.dew;
+  return om.humidity >= 93 && spread <= 2.5 && om.wind.speed <= 5;
 }
 
 // ===== СВОДКА НА ДЕНЬ =====
@@ -264,8 +286,17 @@ async function checkWeather() {
     const rainMm = w.rain && w.rain['1h'];
     const rainNow  = ['Rain', 'Drizzle'].includes(main);
     const stormNow = main === 'Thunderstorm';
+
+    // Туман: официальный статус + видимость + РАСЧЁТ по влажности/точке росы
     let fogNow = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(main) || (w.visibility && w.visibility < 2000);
-    try { const om = await getCurrentOM(); if (om.weather[0].main === 'Fog') fogNow = true; } catch (e) {}
+    let fogCalc = false;
+    try {
+      const om = await getCurrentOM();
+      if (om.weather[0].main === 'Fog') fogNow = true;
+      if (om.visibility != null && om.visibility < 2000) fogNow = true;
+      if (!fogNow && fogRisk(om)) { fogNow = true; fogCalc = true; }
+    } catch (e) {}
+
     const iceNow = isIcy(main, id, temp);
 
     if (wind > WIND_LIMIT && !flags.wind) {
@@ -299,7 +330,11 @@ async function checkWeather() {
     } else if (!iceNow) flags.iceNow = false;
 
     if (fogNow && !flags.fogNow) {
-      await broadcast('🌫 ' + PLACE + ': туман, видимость менее 2 км.');
+      if (fogCalc) {
+        await broadcast('🌫 ' + PLACE + ': вероятен ТУМАН (по расчёту: высокая влажность и точка росы).\nВидимость может быть плохой — будьте осторожны на дороге.');
+      } else {
+        await broadcast('🌫 ' + PLACE + ': туман, видимость менее 2 км.');
+      }
       flags.fogNow = true;
     } else if (!fogNow) flags.fogNow = false;
 
@@ -327,7 +362,7 @@ async function checkWeather() {
 
     console.log(new Date().toISOString(),
       'OK [' + w._source + ']: ' + Math.round(temp) + '°C, ветер ' + wind + '/' + gust + ' м/с ' + dirShort +
-      ', дождь ' + rainNow + ', гроза ' + stormNow + ', гололёд ' + iceNow + ', туман ' + fogNow);
+      ', дождь ' + rainNow + ', гроза ' + stormNow + ', гололёд ' + iceNow + ', туман ' + fogNow + (fogCalc ? ' (расчёт)' : ''));
   } catch (e) {
     console.error('Ошибка проверки погоды:', e.message);
   }
@@ -366,7 +401,7 @@ async function reminderTick() {
   }
 }
 
-// ===== МЕНЮ КОМАНД В ПОЛЕ ВВОДА (Authorization header) =====
+// ===== МЕНЮ КОМАНД В ПОЛЕ ВВОДА =====
 async function setCommands() {
   const cmdsRu = [
     { name: 'погода', description: 'Текущая сводка погоды' },
@@ -390,7 +425,6 @@ async function setCommands() {
     });
     console.log('Меню команд (ru): статус', res.status);
     if (res.status !== 200) {
-      console.log('Ответ MAX:', (await res.text()).slice(0, 200));
       res = await fetch('https://botapi.max.ru/me', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN },
@@ -442,15 +476,17 @@ async function onText(ctx, text) {
       const dd = windDir(w.wind.deg);
       const dirShort = dd[0], dirFull = dd[1];
       const gust = w.wind.gust ? ' (порывы до ' + w.wind.gust + ' м/с)' : '';
-      const vis = (w.visibility != null) ? w.visibility : 10000;
-      const fogOwm = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(w.weather[0].main) || vis < 2000;
       let om = null;
       try { om = await getCurrentOM(); } catch (e) {}
-      const omFog = om ? (om.weather[0].main === 'Fog') : null;
+      const omFog = om ? (om.weather[0].main === 'Fog' || (om.visibility != null && om.visibility < 2000) || fogRisk(om)) : null;
       const omDir = om ? windDir(om.wind.deg)[0] : 'н/д';
-      const fogYes = fogOwm || omFog === true;
-      const fogLine = fogYes ? '🌫 Туман: ДА, видимость ~' + vis + ' м'
-                             : '🌫 Туман: нет, видимость ~' + (vis >= 10000 ? '10+ км' : vis + ' м');
+      const vis = (om && om.visibility != null) ? om.visibility : ((w.visibility != null) ? w.visibility : 10000);
+      const fogYes = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(w.weather[0].main) ||
+                     ((w.visibility != null) && w.visibility < 2000) || omFog === true;
+      const fogLine = fogYes ? '🌫 Туман: ДА, видимость ~' + Math.round(vis) + ' м'
+                             : '🌫 Туман: нет, видимость ~' + (vis >= 10000 ? '10+ км' : Math.round(vis) + ' м');
+      const humLine = om && om.humidity != null
+        ? '\n💧 Влажность: ' + om.humidity + '%, точка росы ' + Math.round(om.dew) + '°C' : '';
       let warn = '';
       if (om && Math.abs(w.wind.speed - om.wind.speed) > 2) {
         warn = '\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ' + w.wind.speed + ' м/с, ' + dirShort +
@@ -461,7 +497,7 @@ async function onText(ctx, text) {
         '🌡 Температура: ' + Math.round(w.main.temp) + '°C\n' +
         '☁️ Состояние: ' + w.weather[0].description + '\n' +
         '💨 Ветер: ' + w.wind.speed + ' м/с' + gust + ', ' + dirShort + ' (' + dirFull + ')\n' +
-        fogLine + '\n━━━━━━━━━━━━━━━\n' +
+        fogLine + humLine + '\n━━━━━━━━━━━━━━━\n' +
         '🔁 Контроль (Open-Meteo): ' + (om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен') +
         ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn
       );
@@ -494,8 +530,7 @@ async function onText(ctx, text) {
           '📆 ' + dayName(d.time[k]) + '\n' +
           '   ' + wmoText(d.weather_code[k]) + '\n' +
           '   🌡 ' + Math.round(d.temperature_2m_min[k]) + '°...' + Math.round(d.temperature_2m_max[k]) + '°C\n' +
-          '   💨 ветер до ' + d.wind_speed_10m_max[k] + ' м/с (порывы ' + d.wind_gusts_10m_max[k] + '), ' + windDir(d.wind_direction_10m_dominant[k])[0] + '\n' +
-          '   ☔ осадки: ' + d.precipitation_sum[k] + ' мм'
+          '   💨 ветер до ' + d.wind_speed_10m_max[k] + ' м/с (порывы ' + d.wind_gusts_10m_max[k] + '), ' + windDir(d.wind_direction_10m_dominant[k])[0]
         );
       }
       ctx.reply('🗓 ' + PLACE + ' — прогноз на неделю (мск):\n━━━━━━━━━━━━━━━\n' + lines.join('\n━━━━━━━━━━━━━━━\n'));
