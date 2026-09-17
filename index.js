@@ -12,18 +12,22 @@ const CHECK_MINUTES = 10;
 const DIGEST_HOURS_UTC = [3, 17]; // 6:00 и 20:00 МСК
 const ADMIN_PASS = process.env.ADMIN_PASS || 'метео2026'; // <<< лучше задать ADMIN_PASS в Variables на Railway!
 
-// Точки мониторинга
+// Точки автомониторинга (автооповещения и сводки 6:00/20:00)
 const PLACES = [
   { name: 'Рай-Александровка', lat: 48.8105, lon: 37.8513 },
-  { name: 'Лисичанск',         lat: 48.9048, lon: 38.4421 },
-  { name: 'Северск',           lat: 48.8669, lon: 38.1000 },
-  { name: 'Алчевск',           lat: 48.4689, lon: 38.8167 }
+  { name: 'Лисичанск',         lat: 48.9048, lon: 38.4421 }
 ];
 
-// Точки для кнопочной команды "погода" (по запросу, без автомониторинга)
-const P_MOSCOW  = { name: 'Москва',  lat: 55.7558, lon: 37.6173 };
-const P_LUGANSK = { name: 'Луганск', lat: 48.5742, lon: 39.3078 };
-const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], PLACES[2], PLACES[3], PLACES[0]];
+// Точки только для ручных запросов (кнопки, без автооповещений)
+const P_SEVERSK  = { name: 'Северск',  lat: 48.8669, lon: 38.1000 };
+const P_ALCHEVSK = { name: 'Алчевск',  lat: 48.4689, lon: 38.8167 };
+const P_MOSCOW   = { name: 'Москва',   lat: 55.7558, lon: 37.6173 };
+const P_LUGANSK  = { name: 'Луганск',  lat: 48.5742, lon: 39.3078 };
+
+// Кнопки команды "погода"
+const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], P_SEVERSK, P_ALCHEVSK, PLACES[0]];
+// Выбор населённого пункта в "неделя"
+const WEEK_PLACES = [PLACES[0], PLACES[1], P_SEVERSK, P_ALCHEVSK];
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
@@ -68,9 +72,12 @@ function dayName(dateStr) {
 function placeNames() {
   return PLACES.map(function (p) { return p.name; }).join(', ');
 }
+function weekNames() {
+  return WEEK_PLACES.map(function (p) { return p.name; }).join(', ');
+}
 function findPlace(text) {
   const t = (text || '').toLowerCase();
-  for (const p of PLACES) {
+  for (const p of WEEK_PLACES) {
     if (t.indexOf(p.name.toLowerCase()) !== -1) return p;
   }
   return null;
@@ -191,7 +198,7 @@ async function sendMenu(userId) {
 // Выбор населённого пункта для прогноза на неделю
 async function sendWeekPicker(userId, replyFn) {
   const text = '🗓 Прогноз на неделю — выберите населённый пункт:';
-  const buttons = PLACES.map(function (p) {
+  const buttons = WEEK_PLACES.map(function (p) {
     return [{ type: 'callback', text: '🗓 ' + p.name, payload: 'week:' + p.name }];
   });
   try {
@@ -663,7 +670,7 @@ async function onText(ctx, text) {
   if (low.indexOf('неделя ') === 0 || low.indexOf('/неделя ') === 0) {
     const p = findPlace(low);
     if (p) { await sendWeek(ctx, p); }
-    else { ctx.reply('Не знаю такой точки. Доступны: ' + placeNames()); }
+    else { ctx.reply('Не знаю такой точки. Доступны: ' + weekNames()); }
     return;
   }
 
