@@ -311,6 +311,18 @@ async function getCrossWind(p) {
   try { return (await getCurrentOM(p)).wind.speed; } catch (e) { return null; }
 }
 
+// Яндекс.Погода: контрольный источник для кнопочной сводки (нужен YANDEX_KEY в Variables)
+async function getCurrentYa(p) {
+  const key = (process.env.YANDEX_KEY || '').trim();
+  if (!key) throw new Error('нет ключа Яндекса');
+  const url = 'https://api.weather.yandex.ru/v2/forecast?lat=' + p.lat + '&lon=' + p.lon + '&lang=ru_RU&limit=1';
+  const res = await fetch(url, { headers: { 'X-Yandex-Weather-Key': key } });
+  const j = await res.json();
+  if (!j || !j.fact) throw new Error('Яндекс: плохой ответ (статус ' + res.status + ')');
+  const dirMap = { n: 'С', ne: 'СВ', e: 'В', se: 'ЮВ', s: 'Ю', sw: 'ЮЗ', w: 'З', nw: 'СЗ', c: 'штиль' };
+  return { temp: j.fact.temp, wind: j.fact.wind_speed, dir: dirMap[j.fact.wind_dir] || 'н/д', humidity: j.fact.humidity };
+}
+
 // Расчётный детектор тумана: влажность >= 93%, точка росы близко, ветер слабый
 function fogRisk(om) {
   if (!om || om.humidity == null || om.dew == null) return false;
@@ -568,11 +580,22 @@ async function sendWeatherNow(ctx, p) {
                            : '🌫 Туман: нет, видимость ~' + (vis >= 10000 ? '10+ км' : Math.round(vis) + ' м');
     const humLine = om && om.humidity != null
       ? '\n💧 Влажность: ' + om.humidity + '%, точка росы ' + Math.round(om.dew) + '°C' : '';
+    let ya = null;
+    try { ya = await getCurrentYa(p); } catch (e) { console.error('Яндекс (' + p.name + '):', e.message); }
+    const winds = [{ n: 'OpenWeatherMap', s: w.wind.speed, d: dirShort }];
+    if (om) winds.push({ n: 'Open-Meteo', s: om.wind.speed, d: omDir });
+    if (ya) winds.push({ n: 'Яндекс', s: ya.wind, d: ya.dir });
     let warn = '';
-    if (om && Math.abs(w.wind.speed - om.wind.speed) > 2) {
-      warn = '\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ' + w.wind.speed + ' м/с, ' + dirShort +
-             '\n   Open-Meteo: ' + om.wind.speed + ' м/с, ' + omDir;
+    const speeds = winds.map(function (x) { return x.s; });
+    if (Math.max.apply(null, speeds) - Math.min.apply(null, speeds) > 2) {
+      warn = '\n⚠️ Источники расходятся по ветру:' + winds.map(function (x) {
+        return '\n   ' + x.n + ': ' + x.s + ' м/с, ' + x.d;
+      }).join('');
     }
+    const yaLine = ya
+      ? '\n🔁 Контроль (Яндекс): ' + Math.round(ya.temp) + '°C, ветер ' + ya.wind + ' м/с, ' + ya.dir +
+        (ya.humidity != null ? ', влажность ' + ya.humidity + '%' : '')
+      : '';
     ctx.reply(
       '📍 ' + p.name + ' | сводка сейчас\n━━━━━━━━━━━━━━━\n' +
       '🌡 Температура: ' + Math.round(w.main.temp) + '°C\n' +
@@ -580,7 +603,7 @@ async function sendWeatherNow(ctx, p) {
       '💨 Ветер: ' + w.wind.speed + ' м/с' + gust + ', ' + dirShort + ' (' + dirFull + ')\n' +
       fogLine + humLine + '\n' +
       '🔁 Контроль (Open-Meteo): ' + (om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен') +
-      ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn + '\n━━━━━━━━━━━━━━━'
+      ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + yaLine + warn + '\n━━━━━━━━━━━━━━━'
     );
   } catch (e) { ctx.reply('Не удалось получить погоду (' + p.name + '), попробуйте позже.'); }
 }
@@ -738,5 +761,6 @@ http.createServer(function (req, res) { res.writeHead(200); res.end('Meteodozor 
   checkWeather();
   bot.start();
   setCommands();
+  console.log('Яндекс.Погода: ' + (process.env.YANDEX_KEY ? 'ключ задан' : 'нет ключа (YANDEX_KEY)'));
   console.log('Бот запущен, мониторинг: ' + placeNames());
 })();
