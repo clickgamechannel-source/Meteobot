@@ -4,6 +4,8 @@ const { Bot } = require('@maxhub/max-bot-api');
 const fetch = require('node-fetch');
 const http = require('http');
 const fs = require('fs');
+const pureimage = require('pureimage');
+const { Readable } = require('stream');
 
 // ===== НАСТРОЙКИ =====
 const WIND_LIMIT = 4;
@@ -68,6 +70,19 @@ function dayName(dateStr) {
   const d = new Date(dateStr + 'T12:00:00+03:00');
   const dm = ('0' + d.getDate()).slice(-2) + '.' + ('0' + (d.getMonth() + 1)).slice(-2);
   return dm + ' (' + days[d.getDay()] + ')';
+}
+
+// Цветная шкала температуры дня на фоне недели: 🟦<0° 🟩0-10 🟨10-20 🟧20-30 🟥30+
+function tempBar(lo, hi, wMin, wMax) {
+  const N = 10, span = (wMax - wMin) || 1;
+  let bar = '';
+  for (let k = 0; k < N; k++) {
+    const t0 = wMin + span * k / N, t1 = wMin + span * (k + 1) / N;
+    if (t1 < lo || t0 > hi) { bar += '⬜'; continue; }
+    const mid = (t0 + t1) / 2;
+    bar += mid < 0 ? '🟦' : mid < 10 ? '🟩' : mid < 20 ? '🟨' : mid < 30 ? '🟧' : '🟥';
+  }
+  return bar;
 }
 function placeNames() {
   return PLACES.map(function (p) { return p.name; }).join(', ');
@@ -319,6 +334,63 @@ async function getCrossWind(p) {
   try { return (await getCurrentOM(p)).wind.speed; } catch (e) { return null; }
 }
 
+// ===== РАДАР RAINVIEWER (только оповещения) =====
+let radarFrame = { path: null, ts: 0 };
+function getRadarFramePath() {
+  if (radarFrame.path && Date.now() - radarFrame.ts < 10 * 60 * 1000) return Promise.resolve(radarFrame.path);
+  return fetch('https://api.rainviewer.com/public/weather-maps.json')
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      const past = j.radar && j.radar.past;
+      if (!past || !past.length) throw new Error('нет кадров радара');
+      radarFrame = { path: past[past.length - 1].path, ts: Date.now() };
+      return radarFrame.path;
+    });
+}
+
+// Ближайший дождь по радару, км (null — в зоне ~200 км сухо). Мозаика 3x3 тайла, z=7.
+function radarRainKm(p) {
+  return getRadarFramePath().then(function (framePath) {
+    const Z = 7, SIZE = 256, N = Math.pow(2, Z);
+    const latR = p.lat * Math.PI / 180;
+    const gpx = (p.lon + 180) / 360 * SIZE * N;
+    const gpy = (1 - Math.asinh(Math.tan(latR)) / Math.PI) / 2 * SIZE * N;
+    const tx = Math.floor(gpx / SIZE), ty = Math.floor(gpy / SIZE);
+    const ox = gpx - (tx - 1) * SIZE, oy = gpy - (ty - 1) * SIZE; // точка в координатах мозаики
+    const kmPx = 156543.03392 * Math.cos(latR) / N / 1000;
+    const jobs = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const u = 'https://tilecache.rainviewer.com' + framePath + '/256/' + Z + '/' + (tx + dx) + '/' + (ty + dy) + '/1/1_1.png';
+        jobs.push(fetch(u)
+          .then(function (r) { if (!r.ok) throw new Error('tile ' + r.status); return r.buffer(); })
+          .then(function (buf) { return pureimage.decodePNGFromStream(Readable.from([buf])); })
+          .catch(function () { return null; }));
+      }
+    }
+    return Promise.all(jobs).then(function (imgs) {
+      let best = null;
+      for (let t = 0; t < imgs.length; t++) {
+        const img = imgs[t];
+        if (!img) continue;
+        const bx = (t % 3) * SIZE, by = Math.floor(t / 3) * SIZE;
+        for (let y = 0; y < SIZE; y++) {
+          for (let x = 0; x < SIZE; x++) {
+            const c = img.getPixelRGBA(x, y);
+            const a = (c >>> 24) & 255;
+            const sum = (c & 255) + ((c >>> 8) & 255) + ((c >>> 16) & 255);
+            if (a > 40 && sum >= 60) {
+              const d = Math.hypot(bx + x - ox, by + y - oy) * kmPx;
+              if (best === null || d < best) best = d;
+            }
+          }
+        }
+      }
+      return best;
+    });
+  });
+}
+
 // Расчётный детектор тумана: влажность >= 93%, точка росы близко, ветер слабый
 function fogRisk(om) {
   if (!om || om.humidity == null || om.dew == null) return false;
@@ -366,7 +438,7 @@ async function buildAllText(header) {
 const flags = {};
 PLACES.forEach(function (p) {
   flags[p.name] = { wind: false, gust: false, rainNow: false, fogNow: false, rainSoon: false,
-                    fogSoon: false, stormNow: false, stormSoon: false, iceNow: false, iceSoon: false };
+                    fogSoon: false, stormNow: false, stormSoon: false, iceNow: false, iceSoon: false, radarRain: false };
 });
 
 function isIcy(main, id, temp) {
@@ -462,6 +534,15 @@ async function checkPlace(p) {
       await broadcast('🌫 Туман приближается к ' + p.name + ', ~3 часа.'); fl.fogSoon = true;
     } else if (!fogSoon) fl.fogSoon = false;
 
+    // Радар RainViewer: реальные осадки рядом (только оповещение)
+    try {
+      const kmRadar = await radarRainKm(p);
+      if (kmRadar !== null && kmRadar <= 25 && !fl.radarRain) {
+        await broadcast('🌧 РАДАР: дождь виден в ~' + Math.max(1, Math.round(kmRadar)) + ' км от ' + p.name + '!\nОсадки реальные (не прогноз) — вероятно, скоро дойдут до нас.');
+        fl.radarRain = true;
+      } else if ((kmRadar === null || kmRadar > 25) && fl.radarRain) fl.radarRain = false;
+    } catch (e) { console.error('Радар (' + p.name + '):', e.message); }
+
     console.log(new Date().toISOString(),
       'OK ' + p.name + ' [' + w._source + ']: ' + Math.round(temp) + '°C, ветер ' + wind + '/' + gust + ' м/с ' + dirShort +
       ', дождь ' + rainNow + ', гроза ' + stormNow + ', гололёд ' + iceNow + ', туман ' + fogNow + (fogCalc ? ' (расчёт)' : ''));
@@ -549,12 +630,15 @@ async function setCommands() {
 async function sendWeek(ctx, p) {
   try {
     const d = await getWeekOM(p);
+    const wMin = Math.min.apply(null, d.temperature_2m_min);
+    const wMax = Math.max.apply(null, d.temperature_2m_max);
     const lines = [];
     for (let k = 0; k < d.time.length; k++) {
+      const tLo = Math.round(d.temperature_2m_min[k]), tHi = Math.round(d.temperature_2m_max[k]);
       lines.push(
         '📆 ' + dayName(d.time[k]) + '\n' +
         '   ' + wmoText(d.weather_code[k]) + '\n' +
-        '   🌡 ' + Math.round(d.temperature_2m_min[k]) + '°...' + Math.round(d.temperature_2m_max[k]) + '°C\n' +
+        '   🌡 ' + tLo + '°...' + tHi + '°C  ' + tempBar(tLo, tHi, wMin, wMax) + '\n' +
         '   💨 ветер до ' + d.wind_speed_10m_max[k] + ' м/с (порывы ' + d.wind_gusts_10m_max[k] + '), ' + windDir(d.wind_direction_10m_dominant[k])[0]
       );
     }
@@ -585,14 +669,38 @@ async function sendWeatherNow(ctx, p) {
       warn = '\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ' + w.wind.speed + ' м/с, ' + dirShort +
              '\n   Open-Meteo: ' + om.wind.speed + ' м/с, ' + omDir;
     }
+    // Ощущается как + советы
+    let feelLine = '';
+    if (w.main.feels_like != null) {
+      const fl0 = Math.round(w.main.feels_like);
+      const tips = [];
+      if (fl0 <= -10) tips.push('одевайтесь очень тепло');
+      else if (fl0 <= 0) tips.push('нужна тёплая одежда');
+      else if (fl0 >= 30) tips.push('жара — больше воды');
+      if (w.wind.speed >= 8) tips.push('сильный ветер — держите головной убор');
+      if (['Rain', 'Drizzle', 'Thunderstorm'].includes(w.weather[0].main)) tips.push('возьмите зонт');
+      if (fogYes) tips.push('на дороге будьте внимательны');
+      feelLine = '🤔 Ощущается как: ' + fl0 + '°C' + (tips.length ? ' — ' + tips.join('; ') : '') + '\n';
+    }
+    // Восход и закат (по смещению часового пояса из OpenWeatherMap)
+    let sunLine = '';
+    if (w.sys && w.sys.sunrise && w.sys.sunset) {
+      const tzs = (w.timezone != null ? w.timezone : 3 * 3600) * 1000;
+      const fm = function (ts) {
+        const d2 = new Date(ts * 1000 + tzs);
+        return ('0' + d2.getUTCHours()).slice(-2) + ':' + ('0' + d2.getUTCMinutes()).slice(-2);
+      };
+      sunLine = '🌅 Восход ' + fm(w.sys.sunrise) + ', закат ' + fm(w.sys.sunset) + '\n';
+    }
     ctx.reply(
       '📍 ' + p.name + ' | сводка сейчас\n━━━━━━━━━━━━━━━\n' +
       '🌡 Температура: ' + Math.round(w.main.temp) + '°C\n' +
+      feelLine +
       '☁️ Состояние: ' + w.weather[0].description + '\n' +
       '💨 Ветер: ' + w.wind.speed + ' м/с' + gust + ', ' + dirShort + ' (' + dirFull + ')\n' +
       fogLine + humLine + '\n' +
       '🔁 Контроль (Open-Meteo): ' + (om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен') +
-      ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn + '\n━━━━━━━━━━━━━━━'
+      ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn + '\n' + sunLine + '━━━━━━━━━━━━━━━'
     );
   } catch (e) { ctx.reply('Не удалось получить погоду (' + p.name + '), попробуйте позже.'); }
 }
@@ -654,7 +762,8 @@ async function onText(ctx, text) {
           const t = new Date(i.dt * 1000 + 3 * 3600 * 1000);
           const hh = ('0' + t.getUTCHours()).slice(-2);
           return '🕐 ' + hh + ':00 — ' + Math.round(i.main.temp) + '°C, ' + i.weather[0].description +
-                 ', ветер ' + i.wind.speed + ' м/с ' + windDir(i.wind.deg)[0];
+                 ', ветер ' + i.wind.speed + ' м/с ' + windDir(i.wind.deg)[0] +
+                 ((i.pop || 0) >= 0.3 ? ', осадки ~' + Math.round(i.pop * 100) + '%' : '');
         });
         parts.push('📍 ' + p.name + '\n' + lines.join('\n'));
       } catch (e) { parts.push('📍 ' + p.name + '\nпрогноз недоступен'); }
