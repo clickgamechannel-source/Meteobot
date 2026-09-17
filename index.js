@@ -19,6 +19,11 @@ const PLACES = [
   { name: 'Северск',           lat: 48.8669, lon: 38.1000 }
 ];
 
+// Точки для кнопочной команды "погода" (по запросу, без автомониторинга)
+const P_MOSCOW  = { name: 'Москва',  lat: 55.7558, lon: 37.6173 };
+const P_LUGANSK = { name: 'Луганск', lat: 48.5742, lon: 39.3078 };
+const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], PLACES[2], PLACES[0]];
+
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
 const TOKEN = (process.env.BOT_TOKEN || '').trim();
@@ -65,6 +70,16 @@ function placeNames() {
 function findPlace(text) {
   const t = (text || '').toLowerCase();
   for (const p of PLACES) {
+    if (t.indexOf(p.name.toLowerCase()) !== -1) return p;
+  }
+  return null;
+}
+function queryNames() {
+  return QUERY_PLACES.map(function (p) { return p.name; }).join(', ');
+}
+function findQuery(text) {
+  const t = (text || '').toLowerCase();
+  for (const p of QUERY_PLACES) {
     if (t.indexOf(p.name.toLowerCase()) !== -1) return p;
   }
   return null;
@@ -136,7 +151,7 @@ async function removeReminder(uid) {
 
 // ===== МЕНЮ С КНОПКАМИ =====
 const MENU_TEXT = '📋 Команды Метеодозора (можно писать просто словом, без /):\n\n' +
-  'погода — сводка по всем точкам прямо сейчас\n' +
+  'погода — сводка сейчас (кнопки выбора города)\n' +
   'прогноз — погода на 12 часов по всем точкам\n' +
   'неделя — прогноз на 7 дней (выбор населённого пункта)\n' +
   'напоминание — ежедневная сводка в ваше время\n' +
@@ -193,6 +208,30 @@ async function sendWeekPicker(userId, replyFn) {
   } catch (e) {
     console.error('Выбор города не отправился:', e.message);
     try { await replyFn(text + '\n(или напишите, например: неделя Лисичанск)'); } catch (e2) {}
+  }
+}
+
+// Выбор населённого пункта для текущей погоды
+async function sendWeatherPicker(userId, replyFn) {
+  const text = '🌤 Погода сейчас — выберите населённый пункт:';
+  const buttons = QUERY_PLACES.map(function (p) {
+    return [{ type: 'callback', text: '🌤 ' + p.name, payload: 'wp:' + p.name }];
+  });
+  try {
+    const res = await fetch('https://botapi.max.ru/messages?user_id=' + userId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': TOKEN },
+      body: JSON.stringify({
+        text: text,
+        attachments: [{ type: 'inline_keyboard', payload: { buttons: buttons } }]
+      })
+    });
+    if (res.status !== 200) {
+      await replyFn(text + '\n(или напишите, например: погода Москва)');
+    }
+  } catch (e) {
+    console.error('Выбор города (погода) не отправился:', e.message);
+    try { await replyFn(text + '\n(или напишите, например: погода Москва)'); } catch (e2) {}
   }
 }
 
@@ -463,7 +502,7 @@ async function reminderTick() {
 // ===== МЕНЮ КОМАНД В ПОЛЕ ВВОДА =====
 async function setCommands() {
   const cmdsRu = [
-    { name: 'погода', description: 'Текущая сводка по всем точкам' },
+    { name: 'погода', description: 'Погода сейчас — выбор города' },
     { name: 'прогноз', description: 'Прогноз на 12 часов' },
     { name: 'неделя', description: 'Прогноз на 7 дней' },
     { name: 'напоминание', description: 'Ежедневная сводка в ваше время' },
@@ -511,6 +550,41 @@ async function sendWeek(ctx, p) {
   } catch (e) { ctx.reply('Не удалось получить прогноз на неделю (' + p.name + ').'); }
 }
 
+// ===== ПОГОДА СЕЙЧАС ПО ВЫБРАННОЙ ТОЧКЕ =====
+async function sendWeatherNow(ctx, p) {
+  try {
+    const w = await getCurrent(p);
+    const dd = windDir(w.wind.deg);
+    const dirShort = dd[0], dirFull = dd[1];
+    const gust = w.wind.gust ? ' (порывы до ' + w.wind.gust + ' м/с)' : '';
+    let om = null;
+    try { om = await getCurrentOM(p); } catch (e) {}
+    const omFog = om ? (om.weather[0].main === 'Fog' || (om.visibility != null && om.visibility < 2000) || fogRisk(om)) : null;
+    const omDir = om ? windDir(om.wind.deg)[0] : 'н/д';
+    const vis = (om && om.visibility != null) ? om.visibility : ((w.visibility != null) ? w.visibility : 10000);
+    const fogYes = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(w.weather[0].main) ||
+                   ((w.visibility != null) && w.visibility < 2000) || omFog === true;
+    const fogLine = fogYes ? '🌫 Туман: ДА, видимость ~' + Math.round(vis) + ' м'
+                           : '🌫 Туман: нет, видимость ~' + (vis >= 10000 ? '10+ км' : Math.round(vis) + ' м');
+    const humLine = om && om.humidity != null
+      ? '\n💧 Влажность: ' + om.humidity + '%, точка росы ' + Math.round(om.dew) + '°C' : '';
+    let warn = '';
+    if (om && Math.abs(w.wind.speed - om.wind.speed) > 2) {
+      warn = '\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ' + w.wind.speed + ' м/с, ' + dirShort +
+             '\n   Open-Meteo: ' + om.wind.speed + ' м/с, ' + omDir;
+    }
+    ctx.reply(
+      '📍 ' + p.name + ' | сводка сейчас\n━━━━━━━━━━━━━━━\n' +
+      '🌡 Температура: ' + Math.round(w.main.temp) + '°C\n' +
+      '☁️ Состояние: ' + w.weather[0].description + '\n' +
+      '💨 Ветер: ' + w.wind.speed + ' м/с' + gust + ', ' + dirShort + ' (' + dirFull + ')\n' +
+      fogLine + humLine + '\n' +
+      '🔁 Контроль (Open-Meteo): ' + (om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен') +
+      ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn + '\n━━━━━━━━━━━━━━━'
+    );
+  } catch (e) { ctx.reply('Не удалось получить погоду (' + p.name + '), попробуйте позже.'); }
+}
+
 // ===== ОБРАБОТКА ТЕКСТА =====
 async function onText(ctx, text) {
   const low = (text || '').trim().toLowerCase();
@@ -547,43 +621,13 @@ async function onText(ctx, text) {
   }
 
   if (low === '/погода' || low === 'погода') {
-    const parts = [];
-    for (const p of PLACES) {
-      try {
-        const w = await getCurrent(p);
-        const dd = windDir(w.wind.deg);
-        const dirShort = dd[0], dirFull = dd[1];
-        const gust = w.wind.gust ? ' (порывы до ' + w.wind.gust + ' м/с)' : '';
-        let om = null;
-        try { om = await getCurrentOM(p); } catch (e) {}
-        const omFog = om ? (om.weather[0].main === 'Fog' || (om.visibility != null && om.visibility < 2000) || fogRisk(om)) : null;
-        const omDir = om ? windDir(om.wind.deg)[0] : 'н/д';
-        const vis = (om && om.visibility != null) ? om.visibility : ((w.visibility != null) ? w.visibility : 10000);
-        const fogYes = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(w.weather[0].main) ||
-                       ((w.visibility != null) && w.visibility < 2000) || omFog === true;
-        const fogLine = fogYes ? '🌫 Туман: ДА, видимость ~' + Math.round(vis) + ' м'
-                               : '🌫 Туман: нет, видимость ~' + (vis >= 10000 ? '10+ км' : Math.round(vis) + ' м');
-        const humLine = om && om.humidity != null
-          ? '\n💧 Влажность: ' + om.humidity + '%, точка росы ' + Math.round(om.dew) + '°C' : '';
-        let warn = '';
-        if (om && Math.abs(w.wind.speed - om.wind.speed) > 2) {
-          warn = '\n⚠️ Источники расходятся по ветру:\n   OpenWeatherMap: ' + w.wind.speed + ' м/с, ' + dirShort +
-                 '\n   Open-Meteo: ' + om.wind.speed + ' м/с, ' + omDir;
-        }
-        parts.push(
-          '📍 ' + p.name + '\n' +
-          '🌡 Температура: ' + Math.round(w.main.temp) + '°C\n' +
-          '☁️ Состояние: ' + w.weather[0].description + '\n' +
-          '💨 Ветер: ' + w.wind.speed + ' м/с' + gust + ', ' + dirShort + ' (' + dirFull + ')\n' +
-          fogLine + humLine + '\n' +
-          '🔁 Контроль (Open-Meteo): ' + (om ? Math.round(om.main.temp) + '°C, ветер ' + om.wind.speed + ' м/с, ' + omDir : 'недоступен') +
-          ', туман: ' + (omFog === null ? 'н/д' : (omFog ? 'да' : 'нет')) + warn
-        );
-      } catch (e) {
-        parts.push('📍 ' + p.name + '\n⚠️ данные временно недоступны');
-      }
-    }
-    ctx.reply('🌤 Сводка прямо сейчас:\n━━━━━━━━━━━━━━━\n' + parts.join('\n━━━━━━━━━━━━━━━\n') + '\n━━━━━━━━━━━━━━━');
+    await sendWeatherPicker(uid, function (t) { return ctx.reply(t); });
+    return;
+  }
+  if (low.indexOf('погода ') === 0 || low.indexOf('/погода ') === 0) {
+    const p = findQuery(low);
+    if (p) { await sendWeatherNow(ctx, p); }
+    else { ctx.reply('Не знаю такой точки. Доступны: ' + queryNames()); }
     return;
   }
 
@@ -675,6 +719,9 @@ bot.on('message_callback', async function (ctx) {
     } else if (payload.indexOf('week:') === 0) {
       const p = findPlace(payload.slice(5));
       if (p) { await sendWeek(fakeCtx, p); }
+    } else if (payload.indexOf('wp:') === 0) {
+      const p = findQuery(payload.slice(3));
+      if (p) { await sendWeatherNow(fakeCtx, p); }
     }
   } catch (e) { console.error('Ошибка кнопки:', e.message); }
 });
