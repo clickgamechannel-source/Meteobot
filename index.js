@@ -9,7 +9,7 @@ const fs = require('fs');
 const WIND_LIMIT = 4;
 const GUST_LIMIT = 8;
 const CHECK_MINUTES = 10;
-const DIGEST_HOUR_UTC = 3;      // 6:00 МСК
+const DIGEST_HOURS_UTC = [3, 17]; // 6:00 и 20:00 МСК
 const ADMIN_PASS = process.env.ADMIN_PASS || 'метео2026'; // <<< лучше задать ADMIN_PASS в Variables на Railway!
 
 // Точки мониторинга
@@ -466,21 +466,25 @@ async function checkWeather() {
   for (const p of PLACES) { await checkPlace(p); }
 }
 
-// ===== УТРЕННЯЯ СВОДКА 6:00 МСК =====
-let lastDigestDate = '';
+// ===== СВОДКИ 6:00 И 20:00 МСК =====
+let lastDigestSlot = '';
 async function digestTick() {
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  if (now.getUTCHours() === DIGEST_HOUR_UTC && lastDigestDate !== today) {
-    lastDigestDate = today;
-    try {
-      const text = await buildAllText('🌅 Доброе утро! Прогноз на сегодня:');
-      if (text) {
-        await broadcast(text + '\nХорошего дня! Напишите «погода» — текущая сводка');
-        console.log('Утренняя сводка отправлена');
-      }
-    } catch (e) { console.error('Ошибка сводки:', e.message); }
-  }
+  const h = now.getUTCHours();
+  if (DIGEST_HOURS_UTC.indexOf(h) === -1) return;
+  const slot = now.toISOString().slice(0, 10) + '-' + h;
+  if (lastDigestSlot === slot) return;
+  lastDigestSlot = slot;
+  try {
+    const morning = (h === DIGEST_HOURS_UTC[0]);
+    const text = await buildAllText(morning ? '🌅 Доброе утро! Прогноз на сегодня:'
+                                            : '🌆 Добрый вечер! Прогноз на ночь:');
+    if (text) {
+      await broadcast(text + (morning ? '\nХорошего дня! Напишите «погода» — текущая сводка'
+                                      : '\nСпокойного вечера! Напишите «погода» — текущая сводка'));
+      console.log('Сводка отправлена, слот ' + slot);
+    }
+  } catch (e) { console.error('Ошибка сводки:', e.message); }
 }
 
 // ===== ЛИЧНЫЕ НАПОМИНАНИЯ =====
