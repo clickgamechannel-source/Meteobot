@@ -16,13 +16,14 @@ const ADMIN_PASS = process.env.ADMIN_PASS || 'метео2026'; // <<< лучше
 const PLACES = [
   { name: 'Рай-Александровка', lat: 48.8105, lon: 37.8513 },
   { name: 'Лисичанск',         lat: 48.9048, lon: 38.4421 },
-  { name: 'Северск',           lat: 48.8669, lon: 38.1000 }
+  { name: 'Северск',           lat: 48.8669, lon: 38.1000 },
+  { name: 'Алчевск',           lat: 48.4689, lon: 38.8167 }
 ];
 
 // Точки для кнопочной команды "погода" (по запросу, без автомониторинга)
 const P_MOSCOW  = { name: 'Москва',  lat: 55.7558, lon: 37.6173 };
 const P_LUGANSK = { name: 'Луганск', lat: 48.5742, lon: 39.3078 };
-const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], PLACES[2], PLACES[0]];
+const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], PLACES[2], PLACES[3], PLACES[0]];
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
