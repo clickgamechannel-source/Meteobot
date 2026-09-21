@@ -178,7 +178,8 @@ const MENU_TEXT = '📋 Команды Метеодозора (можно пис
   'прогноз — погода на 12 часов по всем точкам\n' +
   'неделя — прогноз на 7 дней (выбор населённого пункта)\n' +
   'напоминание — ежедневная сводка в ваше время\n' +
-  'отписаться — выключить рассылку';
+  'отписаться — выключить рассылку\n\n' +
+  '🤖 Я понимаю и свободные вопросы: «будет ли завтра дождь?», «что надеть?», «когда похолодает?», «можно ехать?»';
 
 async function sendMenu(userId) {
   try {
@@ -398,6 +399,196 @@ function fogRisk(om) {
   return om.humidity >= 93 && spread <= 2.5 && om.wind.speed <= 5;
 }
 
+// ===== МОЗГ: выводы и свободные вопросы =====
+// Итоговый вывод по дню для сводок
+function dayVerdict(precip, maxWind, maxGust, tMin, tMax) {
+  const notes = [];
+  if (precip.indexOf('гроза') !== -1) notes.push('гроза — не уходите далеко от укрытия');
+  else if (precip.indexOf('дождь') !== -1 || precip.indexOf('ливн') !== -1) notes.push('пригодится зонт');
+  else if (precip.indexOf('снег') !== -1) notes.push('одевайтесь теплее, будет снег');
+  if (precip.indexOf('туман') !== -1) notes.push('туман — на дороге внимательнее');
+  if (precip.indexOf('ледян') !== -1) notes.push('ледяные осадки — возможен гололёд');
+  if (maxGust >= 15 || maxWind >= 10) notes.push('очень сильный ветер — закрепите всё на улице');
+  else if (maxGust >= 8) notes.push('порывистый ветер');
+  if (tMax <= -5) notes.push('морозно');
+  else if (tMin <= 0 && tMax > 0) notes.push('ночью заморозки — утром возможна наледь');
+  else if (tMax >= 30) notes.push('жарко — вода и тень');
+  if (!notes.length) return '💡 Вывод: спокойная погода, без сюрпризов.';
+  return '💡 Вывод: ' + notes.join('; ') + '.';
+}
+
+function hasAny(t, words) {
+  for (let i = 0; i < words.length; i++) { if (t.indexOf(words[i]) !== -1) return true; }
+  return false;
+}
+
+// Конкретный день недели (1=завтра, 2=послезавтра)
+async function answerDay(ctx, p, offset, word) {
+  const d = await getWeekOM(p);
+  if (offset >= d.time.length) { ctx.reply('Нет данных на ' + word + '.'); return; }
+  const tLo = Math.round(d.temperature_2m_min[offset]), tHi = Math.round(d.temperature_2m_max[offset]);
+  const wMin = Math.min.apply(null, d.temperature_2m_min);
+  const wMax = Math.max.apply(null, d.temperature_2m_max);
+  ctx.reply('🤖 ' + p.name + ', ' + word + ' (' + dayName(d.time[offset]) + '):\n' +
+    wmoText(d.weather_code[offset]) + ', ' + tLo + '°...' + tHi + '°C  ' + tempBar(tLo, tHi, wMin, wMax) + '\n' +
+    '💨 ветер до ' + d.wind_speed_10m_max[offset] + ' м/с (порывы ' + d.wind_gusts_10m_max[offset] + ')\n' +
+    dayVerdict(wmoText(d.weather_code[offset]), d.wind_speed_10m_max[offset], d.wind_gusts_10m_max[offset], tLo, tHi));
+}
+
+// Ближайшие выходные
+async function answerWeekend(ctx, p) {
+  const d = await getWeekOM(p);
+  const lines = [];
+  for (let k = 0; k < d.time.length; k++) {
+    const wd = new Date(d.time[k] + 'T12:00:00+03:00').getDay();
+    if (wd === 6 || wd === 0) {
+      lines.push(dayName(d.time[k]) + ': ' + wmoText(d.weather_code[k]) + ', ' +
+        Math.round(d.temperature_2m_min[k]) + '°...' + Math.round(d.temperature_2m_max[k]) +
+        '°C, ветер до ' + d.wind_speed_10m_max[k] + ' м/с');
+    }
+  }
+  if (!lines.length) { ctx.reply('Выходные пока за пределами прогноза.'); return; }
+  ctx.reply('🤖 ' + p.name + ' — на выходных:\n' + lines.join('\n'));
+}
+
+// Вопрос про дождь: радар (факт) + прогноз (вероятность)
+async function answerRain(ctx, p) {
+  let radarLine = '📡 Радар недоступен.\n';
+  try {
+    const km = await radarRainKm(p);
+    if (km === null) radarLine = '📡 Радар: в зоне ~200 км осадков нет.\n';
+    else if (km <= 25) radarLine = '📡 Радар: дождь УЖЕ в ~' + Math.max(1, Math.round(km)) + ' км от нас — ждите скоро!\n';
+    else radarLine = '📡 Радар: дождь в ~' + Math.round(km) + ' км — пока далеко, но следим.\n';
+  } catch (e) {}
+  let fcLine = '📅 Прогноз недоступен.';
+  try {
+    const f = await getForecastOWM(p, 8);
+    const list = (f && f.list) || [];
+    const wet = list.filter(function (i) { return (i.pop || 0) >= 0.3 || ['Rain', 'Drizzle', 'Thunderstorm'].includes(i.weather[0].main); });
+    if (!wet.length) fcLine = '📅 Прогноз на ближайшие сутки: осадков не ожидается.';
+    else {
+      const lines = wet.slice(0, 4).map(function (i) {
+        const t = new Date(i.dt * 1000 + 3 * 3600 * 1000);
+        const hh = ('0' + t.getUTCHours()).slice(-2);
+        const dd2 = ('0' + t.getUTCDate()).slice(-2) + '.' + ('0' + (t.getUTCMonth() + 1)).slice(-2);
+        return '— ' + dd2 + ' в ' + hh + ':00, вероятность ~' + Math.round((i.pop || 0) * 100) + '%, ' + i.weather[0].description;
+      });
+      fcLine = '📅 Когда ждать осадки (мск):\n' + lines.join('\n');
+    }
+  } catch (e) {}
+  ctx.reply('🤖 ' + p.name + ': будет ли дождь?\n' + radarLine + fcLine);
+}
+
+// Температурный тренд недели
+async function answerTrend(ctx, p) {
+  const d = await getWeekOM(p);
+  let coldest = 0, warmest = 0;
+  for (let k = 1; k < d.time.length; k++) {
+    if (d.temperature_2m_max[k] < d.temperature_2m_max[coldest]) coldest = k;
+    if (d.temperature_2m_max[k] > d.temperature_2m_max[warmest]) warmest = k;
+  }
+  const trend = [];
+  for (let k = 0; k < d.time.length; k++) {
+    trend.push(dayName(d.time[k]) + ': ' + Math.round(d.temperature_2m_min[k]) + '°...' + Math.round(d.temperature_2m_max[k]) + '°');
+  }
+  let verdict = '📉 Самый холодный день: ' + dayName(d.time[coldest]) + ' (днём ' + Math.round(d.temperature_2m_max[coldest]) + '°C).';
+  if (warmest > 0 && d.temperature_2m_max[warmest] > d.temperature_2m_max[0] + 2) {
+    verdict += '\n📈 Потепление к ' + dayName(d.time[warmest]) + ' — до ' + Math.round(d.temperature_2m_max[warmest]) + '°C.';
+  }
+  ctx.reply('🤖 ' + p.name + ' — тренд на неделю:\n' + trend.join('\n') + '\n' + verdict);
+}
+
+// Вопрос про ветер
+async function answerWind(ctx, p) {
+  const w = await getCurrent(p);
+  let maxW = w.wind.speed, maxG = w.wind.gust || 0;
+  try {
+    const f = await getForecastOWM(p, 8);
+    const list = (f && f.list) || [];
+    if (list.length) {
+      maxW = Math.max.apply(null, list.map(function (i) { return i.wind.speed; }));
+      maxG = Math.max.apply(null, list.map(function (i) { return i.wind.gust || 0; }));
+    }
+  } catch (e) {}
+  const dd = windDir(w.wind.deg);
+  let verdict;
+  if (maxG >= 15 || maxW >= 10) verdict = '💡 Опасно сильный ветер! Закрепите всё на улице, не паркуйтесь под деревьями.';
+  else if (maxG >= 8 || maxW >= 6) verdict = '💡 Ветрено — держите головной убор, на дороге возможны порывы.';
+  else if (maxW >= 4) verdict = '💡 Умеренный ветер — неприятно, но не опасно.';
+  else verdict = '💡 Ветер слабый, ничего не грозит.';
+  ctx.reply('🤖 ' + p.name + ': ветер\n' +
+    'Сейчас: ' + w.wind.speed + ' м/с' + (w.wind.gust ? ' (порывы ' + w.wind.gust + ')' : '') + ', ' + dd[0] + '\n' +
+    'Максимум за сутки: ' + maxW + ' м/с, порывы до ' + maxG + ' м/с\n' + verdict);
+}
+
+// Что надеть
+async function answerClothes(ctx, p) {
+  const w = await getCurrent(p);
+  const fl0 = Math.round(w.main.feels_like != null ? w.main.feels_like : w.main.temp);
+  const wet = ['Rain', 'Drizzle', 'Thunderstorm'].includes(w.weather[0].main);
+  const tips = [];
+  if (fl0 <= -15) tips.push('очень тёплая куртка, шапка, шарф, перчатки');
+  else if (fl0 <= -5) tips.push('зимняя куртка и шапка');
+  else if (fl0 <= 5) tips.push('тёплая куртка');
+  else if (fl0 <= 12) tips.push('лёгкая куртка или толстовка');
+  else if (fl0 <= 20) tips.push('кофта с длинным рукавом');
+  else if (fl0 <= 27) tips.push('футболка, можно лёгкое');
+  else tips.push('максимально лёгкая одежда, головной убор от солнца');
+  if (w.wind.speed >= 6) tips.push('ветровка или капюшон — ветер ' + w.wind.speed + ' м/с');
+  if (wet) tips.push('зонт или дождевик — идёт дождь');
+  ctx.reply('🤖 ' + p.name + ': что надеть\n' +
+    'Сейчас ' + Math.round(w.main.temp) + '°C, ощущается как ' + fl0 + '°C\n' +
+    '💡 ' + tips.join('; ') + '.');
+}
+
+// Можно ли ехать (состояние дороги)
+async function answerRoad(ctx, p) {
+  const w = await getCurrent(p);
+  const temp = w.main.temp;
+  const main = w.weather[0].main;
+  const wet = ['Rain', 'Drizzle', 'Thunderstorm'].includes(main);
+  const ice = isIcy(main, w.weather[0].id, temp);
+  let om = null;
+  try { om = await getCurrentOM(p); } catch (e) {}
+  const vis = (om && om.visibility != null) ? om.visibility : ((w.visibility != null) ? w.visibility : 10000);
+  const fog = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(main) || vis < 2000 ||
+              (om && om.weather[0].main === 'Fog') || (om && fogRisk(om));
+  const risks = [];
+  if (ice) risks.push('🧊 ГОЛОЛЁД — по возможности не выезжайте');
+  if (fog) risks.push('🌫 туман, видимость ~' + Math.round(vis) + ' м — снизьте скорость, включите противотуманки');
+  if (wet) risks.push('🌧 мокрая дорога — увеличьте дистанцию');
+  if ((w.wind.gust || 0) >= 8 || w.wind.speed >= 8) risks.push('💨 сильные порывы ветра — держите руль крепче');
+  if (temp <= 0 && !ice) risks.push('❄️ минус — на мостах возможна наледь');
+  const verdict = risks.length ? risks.join('\n') : '✅ Дорога спокойная: без осадков, видимость хорошая, ветер слабый.';
+  ctx.reply('🤖 ' + p.name + ': можно ли ехать?\n' + verdict);
+}
+
+// Роутер свободных вопросов
+async function smartReply(ctx, low) {
+  const p = findQuery(low) || findPlace(low) || PLACES[0];
+  const note = (findQuery(low) || findPlace(low)) ? '' : '\n(это для ' + p.name + ' — можно уточнить другой город)';
+  try {
+    if (hasAny(low, ['послезавтра'])) { await answerDay(ctx, p, 2, 'послезавтра'); }
+    else if (hasAny(low, ['завтра'])) { await answerDay(ctx, p, 1, 'завтра'); }
+    else if (hasAny(low, ['выходн'])) { await answerWeekend(ctx, p); }
+    else if (hasAny(low, ['дождик', 'дождь', 'осадк', 'ливень', 'зонт', 'мокро', 'накрапыв'])) { await answerRain(ctx, p); }
+    else if (hasAny(low, ['потеплее', 'похолодае', 'теплее', 'холоднее', 'заморозк', 'мороз', 'тренд'])) { await answerTrend(ctx, p); }
+    else if (hasAny(low, ['ветер', 'ветрено', 'шторм', 'ураган', 'порыв'])) { await answerWind(ctx, p); }
+    else if (hasAny(low, ['надеть', 'одеться', 'одеваться', 'куртк', 'шапк', 'шорты'])) { await answerClothes(ctx, p); }
+    else if (hasAny(low, ['дорог', 'за руль', 'ехать', 'поехать', 'гололёд', 'гололед', 'видимость'])) { await answerRoad(ctx, p); }
+    else if (hasAny(low, ['сейчас', 'сегодня', 'на улице', 'погод'])) { await sendWeatherNow(ctx, p); }
+    else {
+      ctx.reply('🤖 Я умею отвечать на свободные вопросы! Спросите, например:\n' +
+        '— «будет ли завтра дождь?»\n— «когда похолодает?»\n— «что надеть?»\n' +
+        '— «можно ехать?»\n— «какой ветер?»\n— «погода на выходных»\n\n' + MENU_TEXT);
+    }
+    if (note) { try { await ctx.reply(note.trim()); } catch (e2) {} }
+  } catch (e) {
+    console.error('Мозг:', e.message);
+    ctx.reply('Не понял вопрос 🤔\n\n' + MENU_TEXT);
+  }
+}
+
 // ===== СВОДКА НА ДЕНЬ =====
 async function buildDayText(p, header) {
   const f = await getForecastOWM(p, 4);
@@ -415,10 +606,13 @@ async function buildDayText(p, header) {
   else if (conds['Rain'] || conds['Drizzle']) precip = '🌧 ожидается дождь';
   else if (conds['Snow']) precip = '🌨 ожидается снег';
   if (conds['Fog'] || conds['Mist'] || conds['Haze']) precip += ', 🌫 туман';
+  const tMin = Math.round(Math.min.apply(null, temps));
+  const tMax = Math.round(Math.max.apply(null, temps));
   return header + '\n━━━━━━━━━━━━━━━\n' +
-    '🌡 Температура: от ' + Math.round(Math.min.apply(null, temps)) + '° до ' + Math.round(Math.max.apply(null, temps)) + '°C\n' +
+    '🌡 Температура: от ' + tMin + '° до ' + tMax + '°C\n' +
     '💨 Ветер: до ' + maxWind + ' м/с (порывы до ' + maxGust + ' м/с), ' + dd[0] + ' (' + dd[1] + ')\n' +
-    '☔ Осадки: ' + precip;
+    '☔ Осадки: ' + precip + '\n' +
+    dayVerdict(precip, maxWind, maxGust, tMin, tMax);
 }
 
 // Сводка сразу по всем точкам (для утренней рассылки и напоминаний)
@@ -747,7 +941,7 @@ async function onText(ctx, text) {
   if (low.indexOf('погода ') === 0 || low.indexOf('/погода ') === 0) {
     const p = findQuery(low);
     if (p) { await sendWeatherNow(ctx, p); }
-    else { ctx.reply('Не знаю такой точки. Доступны: ' + queryNames()); }
+    else { await smartReply(ctx, low); }
     return;
   }
 
@@ -818,7 +1012,7 @@ async function onText(ctx, text) {
     return;
   }
 
-  ctx.reply('Не понял команду 🤔\n\n' + MENU_TEXT);
+  await smartReply(ctx, low);
 }
 
 bot.on('message_created', async function (ctx) {
