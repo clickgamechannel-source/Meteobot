@@ -33,6 +33,8 @@ const WEEK_PLACES = [PLACES[0], PLACES[1], P_SEVERSK, P_ALCHEVSK];
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
+const KIMI_KEY = process.env.KIMI_KEY; // ключ Kimi (Moonshot) — ТОЛЬКО через Railway Variables, никогда в коде!
+const KIMI_MODEL = process.env.KIMI_MODEL || 'kimi-k3';
 const TOKEN = (process.env.BOT_TOKEN || '').trim();
 
 process.on('uncaughtException', function (e) { console.error('uncaughtException:', e.message); });
@@ -399,6 +401,7 @@ function fogRisk(om) {
   return om.humidity >= 93 && spread <= 2.5 && om.wind.speed <= 5;
 }
 
+
 // ===== МОЗГ: выводы и свободные вопросы =====
 // Итоговый вывод по дню для сводок
 function dayVerdict(precip, maxWind, maxGust, tMin, tMax) {
@@ -563,6 +566,55 @@ async function answerRoad(ctx, p) {
   ctx.reply('🤖 ' + p.name + ': можно ли ехать?\n' + verdict);
 }
 
+// Погодный контекст для ИИ (текущее + 3 дня по выбранной точке)
+async function buildWeatherContext(p) {
+  const lines = [];
+  try {
+    const w = await getCurrent(p);
+    lines.push(p.name + ' сейчас: ' + Math.round(w.main.temp) + '°C, ' + w.weather[0].description +
+               ', ветер ' + w.wind.speed + ' м/с' + (w.wind.gust ? ' (порывы ' + w.wind.gust + ' м/с)' : ''));
+  } catch (e) {}
+  try {
+    const d = await getWeekOM(p);
+    for (let k = 0; k < Math.min(3, d.time.length); k++) {
+      lines.push(dayName(d.time[k]) + ': ' + wmoText(d.weather_code[k]) + ', ' +
+                 Math.round(d.temperature_2m_min[k]) + '°...' + Math.round(d.temperature_2m_max[k]) +
+                 '°C, ветер до ' + d.wind_speed_10m_max[k] + ' м/с');
+    }
+  } catch (e) {}
+  return lines.join('\n');
+}
+
+// Запрос к Kimi K3 (модель рассуждающая: без temperature, с запасом токенов)
+function askKimi(question, p) {
+  if (!KIMI_KEY) return Promise.resolve(null);
+  return buildWeatherContext(p).then(function (context) {
+    const body = JSON.stringify({
+      model: KIMI_MODEL,
+      max_tokens: 1500,
+      messages: [
+        { role: 'system', content: 'Ты — Метеодозор, погодный бот в мессенджере MAX. Отвечай по-русски, кратко (2-5 предложений), дружелюбно, можно с эмодзи. Опирайся только на данные погоды из контекста; если данных не хватает — честно скажи. Не выдумывай цифры.' },
+        { role: 'user', content: 'Данные погоды:\n' + (context || 'нет данных') + '\n\nВопрос пользователя: ' + question }
+      ]
+    });
+    return fetch('https://api.moonshot.ai/v1/chat/completions', {
+      method: 'POST',
+      timeout: 45000,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KIMI_KEY },
+      body: body
+    }).then(function (r) {
+      if (!r.ok) throw new Error('Kimi HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      const c = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+      return (c && c.trim()) ? c.trim() : null;
+    });
+  }).catch(function (e) {
+    console.error('Kimi:', e.message);
+    return null;
+  });
+}
+
 // Роутер свободных вопросов
 async function smartReply(ctx, low) {
   const p = findQuery(low) || findPlace(low) || PLACES[0];
@@ -578,7 +630,9 @@ async function smartReply(ctx, low) {
     else if (hasAny(low, ['дорог', 'за руль', 'ехать', 'поехать', 'гололёд', 'гололед', 'видимость'])) { await answerRoad(ctx, p); }
     else if (hasAny(low, ['сейчас', 'сегодня', 'на улице', 'погод'])) { await sendWeatherNow(ctx, p); }
     else {
-      ctx.reply('🤖 Я умею отвечать на свободные вопросы! Спросите, например:\n' +
+      const ai = await askKimi(low, p);
+      if (ai) ctx.reply('🤖 ' + ai);
+      else ctx.reply('🤖 Я умею отвечать на свободные вопросы! Спросите, например:\n' +
         '— «будет ли завтра дождь?»\n— «когда похолодает?»\n— «что надеть?»\n' +
         '— «можно ехать?»\n— «какой ветер?»\n— «погода на выходных»\n\n' + MENU_TEXT);
     }
