@@ -41,8 +41,9 @@ process.on('uncaughtException', function (e) { console.error('uncaughtException:
 process.on('unhandledRejection', function (e) { console.error('unhandledRejection:', e && e.message); });
 
 function windDir(deg) {
-  const dirs = [['С','северный'],['СВ','северо-восточный'],['В','восточный'],['ЮВ','юго-восточный'],
-                ['Ю','южный'],['ЮЗ','юго-западный'],['З','западный'],['СЗ','северо-западный']];
+  // Направление ветра + стрелка (куда дует): С вниз, Ю вверх
+  const dirs = [['С ↓','северный'],['СВ ↙','северо-восточный'],['В ←','восточный'],['ЮВ ↖','юго-восточный'],
+                ['Ю ↑','южный'],['ЮЗ ↗','юго-западный'],['З →','западный'],['СЗ ↘','северо-западный']];
   return dirs[Math.round((deg || 0) / 45) % 8];
 }
 function rainWord(mm) {
@@ -180,6 +181,7 @@ const MENU_TEXT = '📋 Команды Метеодозора (можно пис
   'прогноз — погода на 12 часов по всем точкам\n' +
   'неделя — прогноз на 7 дней (выбор населённого пункта)\n' +
   'напоминание — ежедневная сводка в ваше время\n' +
+  'новости — свежие оповещения МЧС по ЛНР\n' +
   'отписаться — выключить рассылку\n\n' +
   '🤖 Я понимаю и свободные вопросы: «будет ли завтра дождь?», «что надеть?», «когда похолодает?», «можно ехать?»';
 
@@ -682,11 +684,94 @@ async function buildAllText(header) {
   return header + '\n' + parts.join('\n━━━━━━━━━━━━━━━\n') + '\n━━━━━━━━━━━━━━━';
 }
 
+// ===== НОВОСТИ МЧС (официальная лента, фильтр по ЛНР) =====
+const NEWS_FEED = process.env.NEWS_FEED || 'https://www.mchs.gov.ru/deyatelnost/press-centr/novosti/rss';
+const NEWS_KEYS = ['лнр', 'луганск', 'лисичанск', 'северодонец', 'рубежн', 'кременн', 'старобельск', 'сватов', 'алчевск', 'рай-александровк'];
+const NEWS_FILE = 'news.json';
+let newsSeen = {};
+let newsLast = [];
+let newsInit = false;
+
+function stripCdata(s) {
+  let t = (s || '');
+  while (t.indexOf('<![CDATA[') !== -1) t = t.replace('<![CDATA[', '');
+  while (t.indexOf(']]>') !== -1) t = t.replace(']]>', '');
+  return t.trim();
+}
+function parseRssItems(text) {
+  const out = [];
+  const parts = text.split('<item>');
+  for (let i = 1; i < parts.length; i++) {
+    const it = parts[i];
+    const g = function (tag) {
+      const a = it.indexOf('<' + tag + '>'), b = it.indexOf('</' + tag + '>');
+      return (a === -1 || b === -1) ? '' : stripCdata(it.slice(a + tag.length + 2, b));
+    };
+    const title = g('title'), link = g('link');
+    if (title) out.push({ title: title, link: link });
+  }
+  return out;
+}
+async function loadNews() {
+  try {
+    if (redis) {
+      newsSeen = JSON.parse((await redis.get('newsSeen')) || '{}');
+      newsLast = JSON.parse((await redis.get('newsLast')) || '[]');
+    } else {
+      const j = JSON.parse(fs.readFileSync(NEWS_FILE, 'utf8'));
+      newsSeen = j.seen || {}; newsLast = j.last || [];
+    }
+  } catch (e) {}
+}
+async function saveNews() {
+  try {
+    if (redis) {
+      await redis.set('newsSeen', JSON.stringify(newsSeen));
+      await redis.set('newsLast', JSON.stringify(newsLast));
+    } else {
+      fs.writeFileSync(NEWS_FILE, JSON.stringify({ seen: newsSeen, last: newsLast }));
+    }
+  } catch (e) {}
+}
+async function checkNews() {
+  try {
+    const r = await fetch(NEWS_FEED, { timeout: 20000 });
+    if (!r.ok) throw new Error('RSS статус ' + r.status);
+    const items = parseRssItems(await r.text());
+    const fresh = [];
+    for (const it of items) {
+      const key = it.link || it.title;
+      if (newsSeen[key]) continue;
+      newsSeen[key] = 1;
+      fresh.push(it);
+    }
+    const seenKeys = Object.keys(newsSeen);
+    if (seenKeys.length > 500) {
+      const keep = {};
+      seenKeys.slice(-300).forEach(function (k) { keep[k] = 1; });
+      newsSeen = keep;
+    }
+    for (const it of fresh) {
+      const low = it.title.toLowerCase();
+      let hit = false;
+      for (const k of NEWS_KEYS) { if (low.indexOf(k) !== -1) { hit = true; break; } }
+      if (!hit) continue;
+      newsLast.unshift(it);
+      if (newsLast.length > 10) newsLast.pop();
+      if (newsInit) await broadcast('📢 МЧС: ' + it.title + (it.link ? '\n' + it.link : ''));
+    }
+    newsInit = true;
+    await saveNews();
+    console.log('Новости МЧС: в ленте', items.length, '| новых:', fresh.length, '| по ЛНР всего:', newsLast.length);
+  } catch (e) { console.error('Новости МЧС:', e.message); }
+}
+
 // ===== ОПОВЕЩЕНИЯ =====
 const flags = {};
 PLACES.forEach(function (p) {
   flags[p.name] = { wind: false, gust: false, rainNow: false, fogNow: false, rainSoon: false,
-                    fogSoon: false, stormNow: false, stormSoon: false, iceNow: false, iceSoon: false, radarRain: false };
+                    fogSoon: false, stormNow: false, stormSoon: false, iceNow: false, iceSoon: false, radarRain: false,
+                    hailNow: false, squall: false, heat: false, frost: false, iceFc: false };
 });
 
 function isIcy(main, id, temp) {
@@ -712,8 +797,10 @@ async function checkPlace(p) {
     // Туман: официальный статус + видимость + РАСЧЁТ по влажности/точке росы
     let fogNow = ['Fog', 'Mist', 'Haze', 'Smoke'].includes(main) || (w.visibility && w.visibility < 2000);
     let fogCalc = false;
+    let omData = null;
     try {
       const om = await getCurrentOM(p);
+      omData = om;
       if (om.weather[0].main === 'Fog') fogNow = true;
       if (om.visibility != null && om.visibility < 2000) fogNow = true;
       if (!fogNow && fogRisk(om)) { fogNow = true; fogCalc = true; }
@@ -750,6 +837,29 @@ async function checkPlace(p) {
       await broadcast('🧊 ОПАСНО! ' + p.name + ': гололёд!\nОсадки при температуре ' + Math.round(temp) + '°C — дороги и провода обледеневают.');
       fl.iceNow = true;
     } else if (!iceNow) fl.iceNow = false;
+
+    // Град: гроза с градом по кодам Open-Meteo (96/99)
+    const hailNow = !!(omData && omData.weather[0].id >= 96);
+    if (hailNow && !fl.hailNow) {
+      await broadcast('🌩 ОПАСНО! ' + p.name + ': гроза С ГРАДОМ!\nУберите машину под укрытие, не выходите на улицу без нужды.');
+      fl.hailNow = true;
+    } else if (!hailNow) fl.hailNow = false;
+
+    // Шквал: экстремальные порывы ветра
+    if (gust >= 15 && !fl.squall) {
+      await broadcast('🌬 ШКВАЛ! ' + p.name + ': порывы ветра ' + gust + ' м/с!\nОпасность падения деревьев и проводов — не выходите на улицу.');
+      fl.squall = true;
+    } else if (gust < 12) fl.squall = false;
+
+    // Аномальная жара / сильный мороз
+    if (temp >= 30 && !fl.heat) {
+      await broadcast('🥵 ' + p.name + ': аномальная жара ' + Math.round(temp) + '°C!\nБольше воды, избегайте солнца в полдень.');
+      fl.heat = true;
+    } else if (temp < 28) fl.heat = false;
+    if (temp <= -15 && !fl.frost) {
+      await broadcast('🥶 ' + p.name + ': сильный мороз ' + Math.round(temp) + '°C!\nНе переохлаждайтесь, проверьте отопление.');
+      fl.frost = true;
+    } else if (temp > -13) fl.frost = false;
 
     if (fogNow && !fl.fogNow) {
       if (fogCalc) {
@@ -790,6 +900,21 @@ async function checkPlace(p) {
         fl.radarRain = true;
       } else if ((kmRadar === null || kmRadar > 25) && fl.radarRain) fl.radarRain = false;
     } catch (e) { console.error('Радар (' + p.name + '):', e.message); }
+
+    // Прогноз гололёда: дождь при плюсе, затем заморозок в ближайшие сутки
+    try {
+      const f8 = await getForecastOWM(p, 8);
+      const l8 = (f8 && f8.list) || [];
+      let wetBefore = false, iceFc = false;
+      for (const it of l8) {
+        if (['Rain', 'Drizzle'].includes(it.weather[0].main) && it.main.temp > 0.5) wetBefore = true;
+        if (wetBefore && it.main.temp <= -0.5) { iceFc = true; break; }
+      }
+      if (iceFc && !fl.iceFc) {
+        await broadcast('🧊 ПРОГНОЗ ГОЛОЛЕДА! ' + p.name + '\nВ ближайшие сутки дождь сменится заморозком — дороги покроются льдом. Планируйте поездки заранее!');
+        fl.iceFc = true;
+      } else if (!iceFc) fl.iceFc = false;
+    } catch (e) { console.error('Прогноз гололеда (' + p.name + '):', e.message); }
 
     console.log(new Date().toISOString(),
       'OK ' + p.name + ' [' + w._source + ']: ' + Math.round(temp) + '°C, ветер ' + wind + '/' + gust + ' м/с ' + dirShort +
@@ -1031,6 +1156,13 @@ async function onText(ctx, text) {
     return;
   }
 
+  if (low === '/новости' || low === 'новости') {
+    if (!newsLast.length) { ctx.reply('Пока нет свежих оповещений МЧС по ЛНР. Как появятся — пришлю автоматически.'); return; }
+    const lines = newsLast.slice(0, 5).map(function (it, i) { return (i + 1) + '. ' + it.title + (it.link ? '\n' + it.link : ''); });
+    ctx.reply('📢 Последние оповещения МЧС по ЛНР:\n\n' + lines.join('\n\n'));
+    return;
+  }
+
   if (low === '/отписаться' || low === 'отписаться') {
     await delSub(uid);
     await removeReminder(uid);
@@ -1102,7 +1234,10 @@ http.createServer(function (req, res) { res.writeHead(200); res.end('Meteodozor 
 // ===== ЗАПУСК =====
 (async function () {
   await loadData();
+  await loadNews();
   setInterval(checkWeather, CHECK_MINUTES * 60 * 1000);
+  setInterval(checkNews, 15 * 60 * 1000);
+  checkNews();
   setInterval(function () { digestTick(); reminderTick(); }, 60 * 1000);
   checkWeather();
   bot.start();
