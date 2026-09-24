@@ -273,7 +273,13 @@ bot.on('bot_started', async function (ctx) {
 async function broadcast(text) {
   for (const id of subscribers) {
     try { await bot.api.sendMessageToUser(id, text); }
-    catch (e) { console.error('Ошибка отправки', id, e.message); }
+    catch (e) {
+      console.error('Ошибка отправки', id, e.message);
+      if (e.message && e.message.indexOf('403') !== -1) {
+        await delSub(id);
+        console.log('Подписчик', id, 'отписан автоматически (диалог недоступен, 403)');
+      }
+    }
   }
 }
 
@@ -329,7 +335,7 @@ async function getWeekOM(p) {
 async function getCurrent(p) {
   try { const w = await getCurrentOWM(p); w._source = 'OpenWeatherMap'; return w; }
   catch (e) {
-    console.error('OWM недоступен (' + p.name + '), резерв Open-Meteo:', e.message);
+    console.error('OWM недоступен (' + p.name + '), резерв Open-Metео:', e.message);
     const w = await getCurrentOM(p);
     if (w.visibility == null) w.visibility = 10000;
     w._source = 'Open-Meteo (резерв)'; return w;
@@ -960,7 +966,14 @@ async function reminderTick() {
       try {
         const text = await buildAllText('⏰ Ваша сводка погоды:');
         if (text) await bot.api.sendMessageToUser(uid, text);
-      } catch (e) { console.error('Ошибка напоминания', uid, e.message); }
+      } catch (e) {
+        console.error('Ошибка напоминания', uid, e.message);
+        if (e.message && e.message.indexOf('403') !== -1) {
+          await delSub(uid);
+          await removeReminder(uid);
+          console.log('Подписчик', uid, 'отписан автоматически (403)');
+        }
+      }
     }
   }
 }
@@ -1202,7 +1215,10 @@ async function onText(ctx, text) {
 }
 
 bot.on('message_created', async function (ctx) {
-  try { await onText(ctx, ctx.message.body.text); }
+  try {
+    console.log('ВХОДЯЩЕЕ от', ctx.user && ctx.user.user_id, ':', ((ctx.message.body && ctx.message.body.text) || '').slice(0, 60));
+    await onText(ctx, ctx.message.body.text);
+  }
   catch (e) { console.error('Ошибка обработки сообщения:', e.message); }
 });
 
@@ -1211,6 +1227,7 @@ bot.on('message_callback', async function (ctx) {
     const payload = ctx.callback && ctx.callback.payload;
     const uid = ctx.user && ctx.user.user_id;
     if (!payload || !uid) return;
+    console.log('КНОПКА от', uid, ':', payload);
     const fakeCtx = {
       user: { user_id: uid },
       reply: function (t) { return bot.api.sendMessageToUser(uid, t); }
