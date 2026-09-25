@@ -128,6 +128,8 @@ let adminId = null;
 let reminders = {};
 const pendingReminder = new Set();
 let lastReminderDay = {};
+let userNames = {}; // id -> имя пользователя (для админ-панели)
+const NAMES_FILE = 'names.json';
 
 async function loadData() {
   try {
@@ -135,9 +137,11 @@ async function loadData() {
       subscribers = new Set((await redis.smembers('subscribers')) || []);
       adminId = await redis.get('admin');
       reminders = (await redis.hgetall('reminders')) || {};
+      userNames = JSON.parse((await redis.get('userNames')) || '{}');
     } else {
       subscribers = new Set(JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8')));
       try { reminders = JSON.parse(fs.readFileSync(REM_FILE, 'utf8')); } catch (e) {}
+      try { userNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')); } catch (e) {}
     }
     console.log('Подписчиков:', subscribers.size, '| админ:', adminId || 'не назначен', '| напоминаний:', Object.keys(reminders).length);
   } catch (e) {}
@@ -268,6 +272,18 @@ bot.on('bot_started', async function (ctx) {
   try { await ctx.reply('Добро пожаловать в Метеодозор! Вы подписаны на оповещения о погоде: ' + placeNames() + '.'); } catch (e) {}
   await sendMenu(ctx.user.user_id);
 });
+
+// Запоминаем имя пользователя (для команды /подписчики)
+async function rememberName(u) {
+  if (!u || !u.user_id) return;
+  const name = u.name || u.first_name || u.username || '';
+  if (userNames[u.user_id] === name) return;
+  userNames[u.user_id] = name;
+  try {
+    if (redis) { await redis.set('userNames', JSON.stringify(userNames)); }
+    else { fs.writeFileSync(NAMES_FILE, JSON.stringify(userNames)); }
+  } catch (e) {}
+}
 
 // ===== РАССЫЛКА =====
 async function broadcast(text) {
@@ -1192,14 +1208,25 @@ async function onText(ctx, text) {
     const pass = text.split(/\s+/)[1];
     if (pass === ADMIN_PASS) {
       await setAdmin(uid);
-      ctx.reply('✅ Вы назначены админом. Команды:\n/подписчики — число подписчиков\n/сказать <текст> — рассылка всем');
+      ctx.reply('✅ Вы назначены админом. Команды:\n/подписчики — список подписчиков (имена + id)\n/сказать <текст> — рассылка всем');
     } else {
       ctx.reply('Неверный пароль.');
     }
     return;
   }
   if (low === '/подписчики') {
-    if (uid === adminId) ctx.reply('👥 Подписчиков в рассылке: ' + subscribers.size);
+    if (uid === adminId) {
+      const lines = [];
+      let i = 0;
+      for (const id of subscribers) {
+        i++;
+        const nm = userNames[id] || '';
+        lines.push(i + '. ' + (nm ? nm : '(имя неизвестно)') + ' — id ' + id);
+      }
+      ctx.reply('👥 Подписчиков в рассылке: ' + subscribers.size +
+                (lines.length ? '\n\n' + lines.join('\n') : '') +
+                '\n\n(имена появляются после того, как человек напишет боту)');
+    }
     return;
   }
   if (low.indexOf('/сказать') === 0) {
@@ -1216,6 +1243,7 @@ async function onText(ctx, text) {
 
 bot.on('message_created', async function (ctx) {
   try {
+    await rememberName(ctx.user);
     console.log('ВХОДЯЩЕЕ от', ctx.user && ctx.user.user_id, ':', ((ctx.message.body && ctx.message.body.text) || '').slice(0, 60));
     await onText(ctx, ctx.message.body.text);
   }
@@ -1227,6 +1255,7 @@ bot.on('message_callback', async function (ctx) {
     const payload = ctx.callback && ctx.callback.payload;
     const uid = ctx.user && ctx.user.user_id;
     if (!payload || !uid) return;
+    await rememberName(ctx.user);
     console.log('КНОПКА от', uid, ':', payload);
     const fakeCtx = {
       user: { user_id: uid },
