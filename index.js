@@ -269,6 +269,10 @@ async function sendWeatherPicker(userId, replyFn) {
 
 bot.on('bot_started', async function (ctx) {
   await addSub(ctx.user.user_id);
+  await rememberName(ctx.user);
+  if (adminId && ctx.user.user_id !== adminId) {
+    try { await bot.api.sendMessageToUser(adminId, '➕ Новый подписчик: ' + (ctx.user.name || ctx.user.first_name || ctx.user.username || '(без имени)') + ' — id ' + ctx.user.user_id + '\nВсего подписчиков: ' + subscribers.size); } catch (e) {}
+  }
   try { await ctx.reply('Добро пожаловать в Метеодозор! Вы подписаны на оповещения о погоде: ' + placeNames() + '.'); } catch (e) {}
   await sendMenu(ctx.user.user_id);
 });
@@ -294,6 +298,9 @@ async function broadcast(text) {
       if (e.message && e.message.indexOf('403') !== -1) {
         await delSub(id);
         console.log('Подписчик', id, 'отписан автоматически (диалог недоступен, 403)');
+        if (adminId && id !== adminId) {
+          try { await bot.api.sendMessageToUser(adminId, '➖ Автоотписка (диалог недоступен): ' + (userNames[id] || '(имя неизвестно)') + ' — id ' + id + '\nОсталось подписчиков: ' + subscribers.size); } catch (e2) {}
+        }
       }
     }
   }
@@ -988,6 +995,9 @@ async function reminderTick() {
           await delSub(uid);
           await removeReminder(uid);
           console.log('Подписчик', uid, 'отписан автоматически (403)');
+          if (adminId && uid !== adminId) {
+            try { await bot.api.sendMessageToUser(adminId, '➖ Автоотписка (диалог недоступен): ' + (userNames[uid] || '(имя неизвестно)') + ' — id ' + uid + '\nОсталось подписчиков: ' + subscribers.size); } catch (e2) {}
+          }
         }
       }
     }
@@ -1196,6 +1206,9 @@ async function onText(ctx, text) {
     await delSub(uid);
     await removeReminder(uid);
     ctx.reply('Вы отписаны от оповещений. Чтобы вернуться — просто напишите боту снова.');
+    if (adminId && uid !== adminId) {
+      try { await bot.api.sendMessageToUser(adminId, '➖ Отписался: ' + (userNames[uid] || '(имя неизвестно)') + ' — id ' + uid + '\nОсталось подписчиков: ' + subscribers.size); } catch (e) {}
+    }
     return;
   }
 
@@ -1221,11 +1234,12 @@ async function onText(ctx, text) {
       for (const id of subscribers) {
         i++;
         const nm = userNames[id] || '';
-        lines.push(i + '. ' + (nm ? nm : '(имя неизвестно)') + ' — id ' + id);
+        const rem = reminders[id] ? ' ⏰' + reminders[id] : '';
+        lines.push(i + '. ' + (nm ? nm : '(имя неизвестно)') + ' — id ' + id + rem);
       }
       ctx.reply('👥 Подписчиков в рассылке: ' + subscribers.size +
                 (lines.length ? '\n\n' + lines.join('\n') : '') +
-                '\n\n(имена появляются после того, как человек напишет боту)');
+                '\n\n⏰ЧЧ:ММ — у человека включено ежедневное напоминание\n(имена появляются после того, как человек напишет боту)');
     }
     return;
   }
