@@ -130,6 +130,8 @@ const pendingReminder = new Set();
 let lastReminderDay = {};
 let userNames = {}; // id -> имя пользователя (для админ-панели)
 const NAMES_FILE = 'names.json';
+let subDates = {}; // id -> дата подписки (YYYY-MM-DD)
+const DATES_FILE = 'subdates.json';
 
 async function loadData() {
   try {
@@ -138,15 +140,24 @@ async function loadData() {
       adminId = await redis.get('admin');
       reminders = (await redis.hgetall('reminders')) || {};
       userNames = JSON.parse((await redis.get('userNames')) || '{}');
+      subDates = JSON.parse((await redis.get('subDates')) || '{}');
     } else {
       subscribers = new Set(JSON.parse(fs.readFileSync(SUBS_FILE, 'utf8')));
       try { reminders = JSON.parse(fs.readFileSync(REM_FILE, 'utf8')); } catch (e) {}
       try { userNames = JSON.parse(fs.readFileSync(NAMES_FILE, 'utf8')); } catch (e) {}
+      try { subDates = JSON.parse(fs.readFileSync(DATES_FILE, 'utf8')); } catch (e) {}
     }
     console.log('Подписчиков:', subscribers.size, '| админ:', adminId || 'не назначен', '| напоминаний:', Object.keys(reminders).length);
   } catch (e) {}
 }
 async function addSub(id) {
+  if (!subscribers.has(id)) {
+    subDates[id] = new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+    try {
+      if (redis) { await redis.set('subDates', JSON.stringify(subDates)); }
+      else { fs.writeFileSync(DATES_FILE, JSON.stringify(subDates)); }
+    } catch (e) {}
+  }
   subscribers.add(id);
   try {
     if (redis) { await redis.sadd('subscribers', id); }
@@ -155,6 +166,11 @@ async function addSub(id) {
 }
 async function delSub(id) {
   subscribers.delete(id);
+  delete subDates[id];
+  try {
+    if (redis) { await redis.set('subDates', JSON.stringify(subDates)); }
+    else { fs.writeFileSync(DATES_FILE, JSON.stringify(subDates)); }
+  } catch (e) {}
   try {
     if (redis) { await redis.srem('subscribers', id); }
     else { fs.writeFileSync(SUBS_FILE, JSON.stringify([...subscribers])); }
@@ -1133,6 +1149,9 @@ async function onText(ctx, text) {
       const t = ('0' + (+m[1])).slice(-2) + ':' + m[2];
       pendingReminder.delete(uid);
       await saveReminder(uid, t);
+      if (adminId && uid !== adminId) {
+        try { await bot.api.sendMessageToUser(adminId, '⏰ ' + (userNames[uid] || '(имя неизвестно)') + ' — id ' + uid + ' поставил(а) ежедневное напоминание на ' + t + ' мск'); } catch (e) {}
+      }
       ctx.reply('✅ Готово! Теперь каждый день в ' + t + ' (мск) вам будет приходить сводка по всем точкам.\nОтключить: напоминание стоп');
     } else {
       ctx.reply('Не понял время. Напишите в формате ЧЧ:ММ, например 07:30');
@@ -1148,6 +1167,9 @@ async function onText(ctx, text) {
   if (low === '/напоминание стоп' || low === 'напоминание стоп') {
     pendingReminder.delete(uid);
     await removeReminder(uid);
+    if (adminId && uid !== adminId) {
+      try { await bot.api.sendMessageToUser(adminId, '⏰❌ ' + (userNames[uid] || '(имя неизвестно)') + ' — id ' + uid + ' отключил(а) напоминание'); } catch (e) {}
+    }
     ctx.reply('Напоминание отключено.');
     return;
   }
@@ -1235,7 +1257,7 @@ async function onText(ctx, text) {
         i++;
         const nm = userNames[id] || '';
         const rem = reminders[id] ? ' ⏰' + reminders[id] : '';
-        lines.push(i + '. ' + (nm ? nm : '(имя неизвестно)') + ' — id ' + id + rem);
+        lines.push(i + '. ' + (nm ? nm : '(имя неизвестно)') + ' — id ' + id + rem + (subDates[id] ? ' (с ' + subDates[id] + ')' : ''));
       }
       ctx.reply('👥 Подписчиков в рассылке: ' + subscribers.size +
                 (lines.length ? '\n\n' + lines.join('\n') : '') +
@@ -1259,6 +1281,13 @@ bot.on('message_created', async function (ctx) {
   try {
     await rememberName(ctx.user);
     console.log('ВХОДЯЩЕЕ от', ctx.user && ctx.user.user_id, ':', ((ctx.message.body && ctx.message.body.text) || '').slice(0, 60));
+    if (adminId && ctx.user && ctx.user.user_id !== adminId) {
+      try {
+        const nmAdm = ctx.user.name || ctx.user.first_name || ctx.user.username || '(без имени)';
+        const txtAdm = (ctx.message.body && ctx.message.body.text) || '';
+        await bot.api.sendMessageToUser(adminId, '💬 ' + nmAdm + ' (id ' + ctx.user.user_id + '): ' + txtAdm.slice(0, 500));
+      } catch (e) {}
+    }
     await onText(ctx, ctx.message.body.text);
   }
   catch (e) { console.error('Ошибка обработки сообщения:', e.message); }
