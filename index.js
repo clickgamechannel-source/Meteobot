@@ -17,7 +17,14 @@ const ADMIN_PASS = process.env.ADMIN_PASS || 'метео2026'; // <<< лучше
 // Точки автомониторинга (автооповещения и сводки 6:00/20:00)
 const PLACES = [
   { name: 'Рай-Александровка', lat: 48.8105, lon: 37.8513 },
-  { name: 'Лисичанск',         lat: 48.9048, lon: 38.4421 }
+  { name: 'Лисичанск',         lat: 48.9048, lon: 38.4421 },
+  { name: 'Луганск',           lat: 48.5742, lon: 39.3078 },
+  { name: 'Алчевск',           lat: 48.4689, lon: 38.8167 },
+  { name: 'Северодонецк',      lat: 48.9482, lon: 38.4917 },
+  { name: 'Рубежное',          lat: 49.0120, lon: 38.3797 },
+  { name: 'Кременная',         lat: 49.0400, lon: 38.2164 },
+  { name: 'Сватово',           lat: 49.4103, lon: 38.1508 },
+  { name: 'Старобельск',       lat: 49.2796, lon: 38.8928 }
 ];
 
 // Точки только для ручных запросов (кнопки, без автооповещений)
@@ -27,9 +34,9 @@ const P_MOSCOW   = { name: 'Москва',   lat: 55.7558, lon: 37.6173 };
 const P_LUGANSK  = { name: 'Луганск',  lat: 48.5742, lon: 39.3078 };
 
 // Кнопки команды "погода"
-const QUERY_PLACES = [P_MOSCOW, P_LUGANSK, PLACES[1], P_SEVERSK, P_ALCHEVSK, PLACES[0]];
+const QUERY_PLACES = [P_MOSCOW, P_SEVERSK].concat(PLACES);
 // Выбор населённого пункта в "неделя"
-const WEEK_PLACES = [PLACES[0], PLACES[1], P_SEVERSK, P_ALCHEVSK];
+const WEEK_PLACES = PLACES.concat([P_SEVERSK]);
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const WEATHER_KEY = process.env.WEATHER_KEY;
@@ -736,6 +743,8 @@ const NEWS_FILE = 'news.json';
 let newsSeen = {};
 let newsLast = [];
 let newsInit = false;
+let firsts = {}; // уже объявленные 'первые' явления сезона
+const FIRSTS_FILE = 'firsts.json';
 
 function stripCdata(s) {
   let t = (s || '');
@@ -990,8 +999,141 @@ async function digestTick() {
       await broadcast(text + (morning ? '\nХорошего дня! Напишите «погода» — текущая сводка'
                                       : '\nСпокойного вечера! Напишите «погода» — текущая сводка'));
       console.log('Сводка отправлена, слот ' + slot);
+      if (morning && nowMsk().getUTCDay() === 0) {
+        try { await weekSummary(); } catch (e) { console.error('Недельная сводка:', e.message); }
+      }
+      if (!morning) {
+        try { await checkChanges(); } catch (e) { console.error('Резкие изменения:', e.message); }
+        try { await checkFirsts(); } catch (e) { console.error('Первые явления:', e.message); }
+      }
     }
   } catch (e) { console.error('Ошибка сводки:', e.message); }
+}
+
+// ===== ОБЩЕЕ ВРЕМЯ МСК =====
+function nowMsk() { return new Date(Date.now() + 3 * 3600 * 1000); }
+
+function wmoEmoji(code) {
+  if (code === 0) return '☀️';
+  if (code === 1) return '🌤';
+  if (code === 2) return '⛅';
+  if (code === 3) return '☁️';
+  if (code === 45 || code === 48) return '🌫';
+  if (code >= 51 && code <= 57) return '🌦';
+  if (code >= 61 && code <= 67) return '🌧';
+  if (code >= 71 && code <= 77) return '🌨';
+  if (code >= 80 && code <= 82) return '🌧';
+  if (code >= 85 && code <= 86) return '🌨';
+  if (code >= 95) return '⛈';
+  return '☁️';
+}
+const DAY_SHORT = ['вс','пн','вт','ср','чт','пт','сб'];
+const WEEK_CITIES = ['Луганск', 'Лисичанск', 'Северодонецк', 'Алчевск', 'Рай-Александровка'];
+
+// Воскресная компактная сводка на неделю по ключевым городам ЛНР
+async function weekSummary() {
+  const parts = [];
+  for (const nm of WEEK_CITIES) {
+    let p = null;
+    for (const x of PLACES) { if (x.name === nm) { p = x; break; } }
+    if (!p) continue;
+    try {
+      const d = await getWeekOM(p);
+      const days = [];
+      for (let k = 0; k < d.time.length; k++) {
+        const wd = DAY_SHORT[new Date(d.time[k] + 'T12:00:00+03:00').getDay()];
+        days.push(wd + ' ' + wmoEmoji(d.weather_code[k]) + ' ' + Math.round(d.temperature_2m_min[k]) + '...' + Math.round(d.temperature_2m_max[k]) + '°');
+      }
+      parts.push('📍 ' + nm + '\n' + days.join(' | '));
+    } catch (e) {}
+  }
+  if (parts.length) await broadcast('🗓 Неделя впереди по ЛНР (мск):\n━━━━━━━━━━━━━━━\n' + parts.join('\n━━━━━━━━━━━━━━━\n'));
+}
+
+// Резкие изменения завтра по всей ЛНР (вечером, после сводки)
+async function checkChanges() {
+  const lines = [];
+  for (const p of PLACES) {
+    try {
+      const d = await getWeekOM(p);
+      const d0 = Math.round(d.temperature_2m_max[0]), d1 = Math.round(d.temperature_2m_max[1]);
+      const c0 = d.weather_code[0], c1 = d.weather_code[1];
+      const snow0 = c0 >= 71 && c0 <= 86, snow1 = c1 >= 71 && c1 <= 86;
+      const rain0 = (c0 >= 51 && c0 <= 67) || (c0 >= 80 && c0 <= 82) || c0 >= 95;
+      const rain1 = (c1 >= 51 && c1 <= 67) || (c1 >= 80 && c1 <= 82) || c1 >= 95;
+      if (d1 <= d0 - 5) lines.push('❄️ ' + p.name + ': резкое похолодание, днём ' + d0 + '° → ' + d1 + '°');
+      else if (d1 >= d0 + 5) lines.push('🔥 ' + p.name + ': резкое потепление, днём ' + d0 + '° → ' + d1 + '°');
+      if (!snow0 && snow1) lines.push('🌨 ' + p.name + ': завтра начнётся снег');
+      else if (!rain0 && rain1) lines.push('🌧 ' + p.name + ': завтра начнутся дожди');
+    } catch (e) {}
+  }
+  if (lines.length) await broadcast('⚡ Резкие изменения погоды ЗАВТРА по ЛНР:\n' + lines.join('\n'));
+}
+
+// «Первые» явления сезона: первый заморозок, первый снег, первое +20
+function seasonKey() {
+  const m = nowMsk();
+  const mo = m.getUTCMonth() + 1, y = m.getUTCFullYear();
+  return mo >= 8 ? 'w' + y : 'w' + (y - 1);
+}
+async function loadFirsts() {
+  try {
+    if (redis) { firsts = JSON.parse((await redis.get('firsts')) || '{}'); }
+    else { firsts = JSON.parse(fs.readFileSync(FIRSTS_FILE, 'utf8')); }
+  } catch (e) {}
+}
+async function saveFirsts() {
+  try {
+    if (redis) { await redis.set('firsts', JSON.stringify(firsts)); }
+    else { fs.writeFileSync(FIRSTS_FILE, JSON.stringify(firsts)); }
+  } catch (e) {}
+}
+async function checkFirsts() {
+  const sk = seasonKey();
+  const mo = nowMsk().getUTCMonth() + 1;
+  let frostHit = null, snowHit = null, heatHit = null;
+  for (const p of PLACES) {
+    try {
+      const d = await getWeekOM(p);
+      for (let k = 0; k < d.time.length; k++) {
+        const tLo = d.temperature_2m_min[k], tHi = d.temperature_2m_max[k], c = d.weather_code[k];
+        if (!frostHit && tLo <= -1) frostHit = p.name + ', ' + dayName(d.time[k]);
+        if (!snowHit && c >= 71 && c <= 86) snowHit = p.name + ', ' + dayName(d.time[k]);
+        if (!heatHit && tHi >= 20) heatHit = p.name + ', ' + dayName(d.time[k]);
+      }
+    } catch (e) {}
+  }
+  const msgs = [];
+  let changed = false;
+  if (frostHit && !firsts['frost' + sk] && (mo >= 8 || mo <= 4)) {
+    firsts['frost' + sk] = 1; changed = true;
+    msgs.push('❄️ ВПЕРВЫЕ в этом сезоне в прогнозе заморозки: ' + frostHit + '. Проверьте отопление, укройте растения!');
+  }
+  if (snowHit && !firsts['snow' + sk] && (mo >= 9 || mo <= 4)) {
+    firsts['snow' + sk] = 1; changed = true;
+    msgs.push('🌨 ВПЕРВЫЕ в этом сезоне в прогнозе появился снег: ' + snowHit + '.');
+  }
+  const yk = 'heat' + nowMsk().getUTCFullYear();
+  if (heatHit && !firsts[yk] && mo >= 3 && mo <= 9) {
+    firsts[yk] = 1; changed = true;
+    msgs.push('☀️ ВПЕРВЫЕ в этом году в прогнозе +20°C и выше: ' + heatHit + '. Тепло на подходе!');
+  }
+  if (msgs.length) await broadcast('🗓 Погодная веха:\n' + msgs.join('\n'));
+  if (changed) await saveFirsts();
+}
+
+// Еженедельный вопрос подписчикам (воскресенье 18:00 мск)
+let lastFeedbackDay = '';
+async function feedbackTick() {
+  const m = nowMsk();
+  if (m.getUTCDay() !== 0 || m.getUTCHours() !== 18) return;
+  const today = m.toISOString().slice(0, 10);
+  if (lastFeedbackDay === today) return;
+  lastFeedbackDay = today;
+  try {
+    await broadcast('📋 Вопрос недели от Метеодозора: что улучшить? Какие населённые пункты или оповещения добавить?\nПросто ответьте сообщением — администратор всё увидит. Спасибо, что вы с нами! 🙌');
+    console.log('Вопрос недели отправлен');
+  } catch (e) { console.error('Вопрос недели:', e.message); }
 }
 
 // ===== ЛИЧНЫЕ НАПОМИНАНИЯ =====
@@ -1324,10 +1466,11 @@ http.createServer(function (req, res) { res.writeHead(200); res.end('Meteodozor 
 (async function () {
   await loadData();
   await loadNews();
+  await loadFirsts();
   setInterval(checkWeather, CHECK_MINUTES * 60 * 1000);
   setInterval(checkNews, 15 * 60 * 1000);
   checkNews();
-  setInterval(function () { digestTick(); reminderTick(); }, 60 * 1000);
+  setInterval(function () { digestTick(); reminderTick(); feedbackTick(); }, 60 * 1000);
   checkWeather();
   bot.start();
   setCommands();
